@@ -43,7 +43,8 @@ class RawVideoDataset(Dataset):
         assert downsampled in [1, 4, 2], "downsampled must be 1, 4, or 2"
         self.window_size = window_size
         data_dir = Path(data_dir)
-        self.metadata = json.load(open(data_dir / "metadata.json"))
+        with open(data_dir / "metadata.json", "r") as f:
+            self.metadata = json.load(f)
         self.num_shards = self.metadata["num_shards"]
         self.train = "train_v2.0_raw" in str(data_dir)
 
@@ -72,9 +73,8 @@ class RawVideoDataset(Dataset):
 
         self.clip_start_idxs = []  # (shard_idx, frame_id)
         for shard_idx in range(self.num_shards):
-            shard_metadata = json.load(
-                open(self.metadata_path / f"metadata_{shard_idx}.json")
-            )
+            with open(self.metadata_path / f"metadata_{shard_idx}.json", "r") as f:
+                shard_metadata = json.load(f)
             num_frames = shard_metadata["shard_num_frames"]
 
             self.num_frames_per_shard[shard_idx] = num_frames

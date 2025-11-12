@@ -25,7 +25,8 @@ def inference(config: JobConfig):
     # Distributed processing setup: Each GPU/process handles a subset of prompts
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
-    original_prompts = open(config.inference.prompts_path).readlines()
+    with open(config.inference.prompts_path, "r") as f:
+        original_prompts = f.readlines()
     total_prompts = len(original_prompts)
 
     # Distribute prompts across processes using round-robin assignment
