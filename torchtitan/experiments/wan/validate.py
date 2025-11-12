@@ -139,7 +139,6 @@ class WanValidator(Validator):
                     job_config=self.job_config,
                     model=model,
                     prompt=p,
-                    # autoencoder=self.autoencoder,
                     wan_video_vae=self.wan_video_vae,
                     t5_tokenizer=self.t5_tokenizer,
                     clip_tokenizer=self.clip_tokenizer,
@@ -164,7 +163,7 @@ class WanValidator(Validator):
             input_dict = preprocess_data(
                 device=self.device,
                 dtype=self._dtype,
-                autoencoder=self.autoencoder,
+                wan_video_vae=self.wan_video_vae,
                 clip_encoder=self.clip_encoder,
                 t5_encoder=self.t5_encoder,
                 batch=input_dict,
