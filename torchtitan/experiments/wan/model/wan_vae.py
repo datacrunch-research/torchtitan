@@ -1,6 +1,4 @@
 from torchtitan.tools.logging import logger
-
-from pydoc import cli
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

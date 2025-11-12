@@ -9,7 +9,7 @@ set -ex
 
 # use envs as local overrides for convenience
 # e.g.
-# LOG_RANK=0,1 NGPU=4 ./torchtitan/experiments/flux/run_train.sh
+# LOG_RANK=0,1 NGPU=4 ./torchtitan/experiments/wan/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/wan/train_configs/wan.toml"}

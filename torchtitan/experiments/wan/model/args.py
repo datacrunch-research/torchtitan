@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
+from torchtitan.experiments.wan.model.autoencoder import AutoEncoderParams
 
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
@@ -35,5 +35,5 @@ class WanModelArgs(BaseModelArgs):
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
         nparams = sum(p.numel() for p in model.parameters())
-        logger.warning("FLUX model haven't implement get_nparams_and_flops() function")
+        logger.warning("Wan2.2 TI2V model haven't implement get_nparams_and_flops() function")
         return nparams, 1

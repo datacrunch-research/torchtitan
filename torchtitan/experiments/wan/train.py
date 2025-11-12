@@ -12,13 +12,8 @@ import torch
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 
-# from torchtitan.models.flux.infra.parallelize import parallelize_encoders
 from torchtitan.experiments.wan.infra.parallelize import parallelize_encoders
-
-# from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.experiments.wan.model.autoencoder import load_ae
-
-# from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.utils import (
     create_position_encoding_for_latents,
@@ -41,7 +36,7 @@ class WanTrainer(Trainer):
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
-        # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        # For Wan model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
             self.parallel_dims.world_mesh,
             self.device,
@@ -51,7 +46,7 @@ class WanTrainer(Trainer):
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
         # We cast the encoders and it's input/output to this dtype.  If FSDP with mixed precision training is not used,
-        # the dtype for encoders is torch.float32 (default dtype for Flux Model).
+        # the dtype for encoders is torch.float32 (default dtype for Wan Model).
         # Otherwise, we use the same dtype as mixed precision training process.
         self._dtype = (
             TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
@@ -61,8 +56,6 @@ class WanTrainer(Trainer):
 
         # load components
         model_args = self.train_spec.model_args[job_config.model.flavor]
-        print(model_args)
-        print(job_config.encoder.autoencoder_path)
         self.autoencoder = load_ae(
             job_config.encoder.autoencoder_path,
             model_args.autoencoder_params,
@@ -70,7 +63,6 @@ class WanTrainer(Trainer):
             dtype=self._dtype,
             random_init=job_config.training.test_mode,
         )
-        print(job_config.encoder.wan_vae_path)
         self.wan_video_vae = load_wan_vae(
             job_config.encoder.wan_vae_path,
             model_args.wan_video_vae_params,
@@ -118,7 +110,7 @@ class WanTrainer(Trainer):
         logger.info("Empty string embeddings precomputed successfully")
 
         if job_config.validation.enable:
-            self.validator.flux_init(
+            self.validator.wan_init(
                 device=self.device,
                 _dtype=self._dtype,
                 autoencoder=self.autoencoder,

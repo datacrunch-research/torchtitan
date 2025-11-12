@@ -19,16 +19,11 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.wan.wan_datasets import build_wan_validation_dataloader
-# from torchtitan.models.flux.inference.sampling import generate_image, save_image
 from torchtitan.experiments.wan.inference.sampling import generate_image, save_image
-# from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.experiments.wan.model.autoencoder import AutoEncoder
-# from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 
-# from torchtitan.models.flux.tokenizer import build_flux_tokenizer
 from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
-# from torchtitan.models.flux.utils import (
 from torchtitan.experiments.wan.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -204,7 +199,7 @@ class WanValidator(Validator):
 
             bsz, _, latent_height, latent_width = latents.shape
 
-            POSITION_DIM = 3  # constant for Flux flow model
+            POSITION_DIM = 3  # constant for Wan flow model
             with torch.no_grad(), torch.device(self.device):
                 # Create positional encodings
                 latent_pos_enc = create_position_encoding_for_latents(

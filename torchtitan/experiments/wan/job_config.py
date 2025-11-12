@@ -37,7 +37,7 @@ class Encoder:
     """Clip encoder to use, HuggingFace model name. This field could be either a local folder path,
         or a Huggingface repo name."""
     autoencoder_path: str = (
-        "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
+        "torchtitan/models/flux/assets/autoencoder/ae.safetensors"
     )
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     wan_vae_path: str = "Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
@@ -71,7 +71,7 @@ class Inference:
 
     save_img_folder: str = "inference_results"
     """Path to save the inference results"""
-    prompts_path: str = "./torchtitan/experiments/flux/inference/prompts.txt"
+    prompts_path: str = "./torchtitan/experiments/wan/inference/prompts.txt"
     """Path to file with newline separated prompts to generate images for"""
     local_batch_size: int = 2
     """Batch size for inference"""
@@ -82,7 +82,7 @@ class Inference:
 @dataclass
 class JobConfig:
     """
-    Extend the tyro parser with custom config classes for Flux model.
+    Extend the tyro parser with custom config classes for Wan model.
     """
 
     training: Training = field(default_factory=Training)

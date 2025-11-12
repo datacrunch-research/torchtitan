@@ -10,9 +10,9 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.models.flux.inference.sampling import generate_image, save_image
-from torchtitan.models.flux.tokenizer import build_flux_tokenizer
-from torchtitan.models.flux.train import FluxTrainer
+from torchtitan.experiments.wan.inference.sampling import generate_image, save_image
+from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
+from torchtitan.experiments.wan.train import WanTrainer
 from torchtitan.tools.logging import init_logger, logger
 
 
@@ -20,7 +20,7 @@ from torchtitan.tools.logging import init_logger, logger
 @record
 def inference(config: JobConfig):
     # Reuse trainer to perform forward passes
-    trainer = FluxTrainer(config)
+    trainer = WanTrainer(config)
 
     # Distributed processing setup: Each GPU/process handles a subset of prompts
     world_size = int(os.environ["WORLD_SIZE"])
@@ -32,7 +32,7 @@ def inference(config: JobConfig):
     prompts = original_prompts[global_rank::world_size]
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
-    t5_tokenizer, clip_tokenizer = build_flux_tokenizer(config)
+    t5_tokenizer, clip_tokenizer = build_wan_tokenizer(config)
 
     if global_rank == 0:
         logger.info("Starting inference...")

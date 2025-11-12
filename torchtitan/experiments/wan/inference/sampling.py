@@ -17,10 +17,10 @@ from torch import Tensor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 
-from torchtitan.models.flux.model.autoencoder import AutoEncoder
-from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.models.flux.model.model import FluxModel
-from torchtitan.models.flux.utils import (
+from torchtitan.experiments.wan.model.autoencoder import AutoEncoder
+from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
+from torchtitan.experiments.wan.model.model import WanModel
+from torchtitan.experiments.wan.utils import (
     create_position_encoding_for_latents,
     generate_noise_latent,
     pack_latents,
@@ -75,13 +75,13 @@ def generate_image(
     device: torch.device,
     dtype: torch.dtype,
     job_config: JobConfig,
-    model: FluxModel,
+    model: WanModel,
     prompt: str | list[str],
     autoencoder: AutoEncoder,
     t5_tokenizer: BaseTokenizer,
     clip_tokenizer: BaseTokenizer,
-    t5_encoder: FluxEmbedder,
-    clip_encoder: FluxEmbedder,
+    t5_encoder: WanEmbedder,
+    clip_encoder: WanEmbedder,
 ) -> torch.Tensor:
     """
     Sampling and save a single images from noise using a given prompt.
@@ -165,7 +165,7 @@ def generate_image(
 def denoise(
     device: torch.device,
     dtype: torch.dtype,
-    model: FluxModel,
+    model: WanModel,
     img_width: int,
     img_height: int,
     denoising_steps: int,
@@ -177,7 +177,7 @@ def denoise(
     classifier_free_guidance_scale: float | None = None,
 ) -> torch.Tensor:
     """
-    Sampling images from noise using a given prompt, by running inference with trained Flux model.
+    Sampling images from noise using a given prompt, by running inference with trained Wan model.
     Save the generated images to the given output path.
     """
     bsz = clip_encodings.shape[0]
@@ -252,7 +252,7 @@ def save_image(
     img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
 
     exif_data = Image.Exif()
-    exif_data[ExifTags.Base.Software] = "AI generated;txt2img;flux"
+    exif_data[ExifTags.Base.Software] = "AI generated;txt2img;wan"
     exif_data[ExifTags.Base.Make] = "Black Forest Labs"
     exif_data[ExifTags.Base.Model] = name
     if add_sampling_metadata:

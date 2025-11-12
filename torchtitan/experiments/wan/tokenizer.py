@@ -17,10 +17,10 @@ from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
 
 
-class FluxTestTokenizer(BaseTokenizer):
+class WanTestTokenizer(BaseTokenizer):
     """
-    Flux Tokenizer for test purpose. This is a simple wrapper around the TikTokenizer,
-     to make it has same interface as the T5 and CLIP tokenizer used for Flux.
+    Wan Tokenizer for test purpose. This is a simple wrapper around the TikTokenizer,
+     to make it has same interface as the T5 and CLIP tokenizer used for Wan.
     """
 
     def __init__(self, model_path: str = "t5-small", max_length: int = 77, **hf_kwargs):
@@ -142,7 +142,7 @@ def build_wan_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseToken
 
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
     if job_config.training.test_mode:
-        tokenizer_class = FluxTestTokenizer
+        tokenizer_class = WanTestTokenizer
         t5_tokenizer_path = clip_tokenzier_path = job_config.model.hf_assets_path
     else:
         tokenizer_class = WanTokenizer

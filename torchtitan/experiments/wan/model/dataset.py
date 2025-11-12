@@ -122,13 +122,12 @@ class RawVideoDataset(Dataset):
                 robot_states = robot_states[self.frame_idxs]
         video_frames = torch.from_numpy(video_frames)
 
+        # Note: this could be put here to do all the frame preprocessing at once
         # video_frames = torch.tensor(video_frames, dtype=torch.bfloat16)
-
         # # Normalize video frames between -1 and 1
         # max_value = 1.
         # min_value = -1.
         # video_frames = video_frames * ((max_value - min_value) / 255.) + min_value
-
         # # T, H, W, C -> T, C, H, W
         # video_frames = video_frames.permute(0, 3, 1, 2)
 

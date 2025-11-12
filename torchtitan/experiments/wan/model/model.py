@@ -7,7 +7,7 @@
 import torch
 from torch import nn, Tensor
 
-from torchtitan.models.flux.model.layers import (
+from torchtitan.experiments.wan.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
@@ -26,7 +26,7 @@ class WanModel(nn.Module, ModelProtocol):
     Transformer model for flow matching on sequences.
 
     Args:
-        model_args: FluxModelArgs.
+        model_args: WanModelArgs.
 
     Attributes:
         model_args (TransformerModelArgs): Model configuration arguments.
