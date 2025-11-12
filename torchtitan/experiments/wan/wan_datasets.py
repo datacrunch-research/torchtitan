@@ -225,7 +225,7 @@ def _process_raw_video_sample(
 
 
 DATASETS = {
-    "1x-wmds": DatasetConfig(
+    "1xwm": DatasetConfig(
         path="",  # Path will be provided via dataset_path in config
         loader=_load_raw_video_dataset,
         sample_processor=_process_raw_video_sample,
@@ -324,7 +324,7 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
         
         # Create the underlying RawVideoDataset
         # The loader for 1x-wmds accepts additional parameters
-        if dataset_name == "1x-wmds":
+        if dataset_name == "1xwm":
             raw_dataset = dataset_loader(
                 path,
                 downsampled=downsampled,
@@ -363,8 +363,11 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
 
     def _get_data_iter(self):
         """Get iterator over the dataset for this rank."""
-        # Create indices for this rank
-        indices = list(range(self._start_idx, self._end_idx))
+        # Start from checkpointed position to resume correctly
+        # load_state_dict already ensures _sample_idx is within valid range
+        if self._sample_idx >= self._end_idx:
+            return iter([])
+        indices = list(range(self._sample_idx, self._end_idx))
         return iter(indices)
 
     def __iter__(self):
@@ -579,7 +582,7 @@ def build_wan_dataloader(
     t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
 
     # Use RawVideoDatasetWrapper for video datasets
-    if dataset_name == "1x-wmds":
+    if dataset_name == "1xwm":
         ds = RawVideoDatasetWrapper(
             dataset_name=dataset_name,
             dataset_path=dataset_path,
@@ -590,18 +593,18 @@ def build_wan_dataloader(
             dp_world_size=dp_world_size,
             infinite=infinite,
         )
-    else:
-        # Use WanDataset for HuggingFace datasets
-        ds = WanDataset(
-            dataset_name=dataset_name,
-            dataset_path=dataset_path,
-            t5_tokenizer=t5_tokenizer,
-            clip_tokenizer=clip_tokenizer,
-            job_config=job_config,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            infinite=infinite,
-        )
+    # else:
+    #     # Use WanDataset for HuggingFace datasets
+    #     ds = WanDataset(
+    #         dataset_name=dataset_name,
+    #         dataset_path=dataset_path,
+    #         t5_tokenizer=t5_tokenizer,
+    #         clip_tokenizer=clip_tokenizer,
+    #         job_config=job_config,
+    #         dp_rank=dp_rank,
+    #         dp_world_size=dp_world_size,
+    #         infinite=infinite,
+    #     )
 
     return ParallelAwareDataloader(
         dataset=ds,

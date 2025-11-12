@@ -37,11 +37,8 @@ decay_ratio = 0.0  # no decay
 local_batch_size = 1
 max_norm = 1.0  # grad norm clipping
 steps = 30_000
-# Use the new 1x-wmds dataset
-dataset = "1x-wmds"
-# Path to your dataset directory (e.g., containing metadata.json, videos/, robot_states/, etc.)
+dataset = "1xwm"
 dataset_path = "/root/dataset/world_model_raw_data/train_v2.0_raw"
-# Dataset-specific parameters
 downsampled = 4  # Downsampling factor: 1, 2, or 4
 clip_length = 77  # Number of frames per clip
 window_size = 8  # Window size for sampling clips

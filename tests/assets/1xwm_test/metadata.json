@@ -1,0 +1,6 @@
+{
+  "num_shards": 1,
+  "query": null,
+  "hz": 30,
+  "num_images": 3000
+}
