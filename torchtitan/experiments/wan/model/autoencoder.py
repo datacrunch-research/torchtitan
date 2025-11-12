@@ -383,9 +383,9 @@ def load_ae(
         sd = load_sft(ckpt_path, device=str(device))
         missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
         if len(missing) > 0:
-            print(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
+            logger.warning(f"Got {len(missing)} missing keys when loading autoencoder:\n\t" + "\n\t".join(missing))
         if len(unexpected) > 0:
-            print(
-                f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected)
+            logger.warning(
+                f"Got {len(unexpected)} unexpected keys when loading autoencoder:\n\t" + "\n\t".join(unexpected)
             )
     return ae.to(dtype=dtype)
