@@ -32,7 +32,6 @@ from torchtitan.experiments.wan.model.wan_vae import load_wan_vae
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
-from icecream import ic
 
 
 class WanTrainer(Trainer):
@@ -143,12 +142,11 @@ class WanTrainer(Trainer):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
-            ic(labels.shape)
-            ic(labels.device)
-            ic(labels.dtype)
-            ntokens_batch = labels.numel()
-            ic(ntokens_batch)
-            ic(self.ntokens_seen)
+            logger.info(f"labels.shape: {labels.shape}")
+            ntokens_batch = 1 + (labels.shape[1] - 1) // 4 *  labels.shape[2] // 16 * labels.shape[3] // 16
+            
+            logger.info(f"ntokens_batch: {ntokens_batch}")
+            logger.info(f"self.ntokens_seen: {self.ntokens_seen}")
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
@@ -192,13 +190,14 @@ class WanTrainer(Trainer):
         bsz = labels.shape[0]
 
         with torch.no_grad(), torch.device(self.device):
-            noise = torch.randn_like(labels)
-            timesteps = torch.rand((bsz,))
+            noise = torch.randn_like(labels, dtype=torch.bfloat16)
+            timesteps = torch.rand((bsz,), dtype=torch.bfloat16)
             sigmas = timesteps.view(-1, 1, 1, 1)
             latents = (1 - sigmas) * labels + sigmas * noise
         # TODO: keep in mind the masking of the latents
         logger.info(f"latents shape: {latents.shape}")
         logger.info(f"latents device: {latents.device}")
+        assert latents.dtype == torch.bfloat16, "Latents must be bfloat16"
         logger.info(f"latents dtype: {latents.dtype}")
 
         bsz, _, _, latent_height, latent_width = latents.shape

@@ -12,7 +12,7 @@ from torch import Tensor
 
 from .model.hf_embedder import WanEmbedder
 from .model.wan_vae import WanVideoVAE
-from icecream import ic
+# from icecream import ic
 from torchtitan.tools.logging import logger
 
 
@@ -96,15 +96,14 @@ def preprocess_data(
     logger.info(videos.device)
     logger.info(videos.dtype)
     # Transpose from (B, T, C, H, W) to (B, C, T, H, W) for VAE encoding
-    # The VAE encode method can accept either a tensor (B, C, T, H, W) or a list of (C, T, H, W) tensors
-    # Following wan_video_1x.py pattern, we pass the tensor directly
+    # The VAE encode method expects a batched tensor of shape (B, C, T, H, W)
     videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
     logger.info(f"After transpose: {videos.shape}")
     
     # Encode videos to latents using the WAN Video VAE
-    # The encode method will automatically iterate over the batch dimension if given a tensor
+    # The encode method processes the entire batch at once for better performance
     video_latents = wan_video_vae.encode(
-        videos,  # Pass tensor directly, method handles batch dimension
+        videos,  # Batched tensor (B, C, T, H, W)
         device=device,
         tiled=False,
     )
@@ -200,22 +199,17 @@ def pack_latents(x: Tensor) -> Tensor:
             Shape: (bsz, (temporal * latent_height // 2 * latent_width // 2), channels * 4)
     """
     PATCH_HEIGHT, PATCH_WIDTH = 2, 2
-    ic("pack_latents input", x.shape)
     b, c, t, h, w = x.shape
     h_patches = h // PATCH_HEIGHT
     w_patches = w // PATCH_WIDTH
-    ic("pack_latents", b, c, t, h, w, "-> patches", h_patches, w_patches)
 
     # Pack spatial patches: (B, C, T, H, W) -> (B, C, T, H/2, W/2, 2, 2)
     x = x.unfold(3, PATCH_HEIGHT, PATCH_HEIGHT).unfold(4, PATCH_WIDTH, PATCH_WIDTH)
-    ic("after unfold", x.shape)
     # x is now (B, C, T, H/2, W/2, 2, 2)
 
     # Rearrange: (B, C, T, H/2, W/2, 2, 2) -> (B, T, H/2, W/2, C, 2, 2) -> (B, T*H/2*W/2, C*4)
     x = x.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
-    ic("after permute", x.shape)
     x = x.reshape(b, t * h_patches * w_patches, c * PATCH_HEIGHT * PATCH_WIDTH)
-    ic("pack_latents output", x.shape)
     
     return x
 
@@ -238,23 +232,18 @@ def unpack_latents(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
     """
     PATCH_HEIGHT, PATCH_WIDTH = 2, 2
 
-    ic("unpack_latents input", x.shape, "target", latent_height, latent_width)
     b, seq_len, c_ph_pw = x.shape
     h_patches = latent_height // PATCH_HEIGHT
     w_patches = latent_width // PATCH_WIDTH
     c = c_ph_pw // (PATCH_HEIGHT * PATCH_WIDTH)
     t = seq_len // (h_patches * w_patches)
-    ic("unpack_latents computed", b, c, t, h_patches, w_patches, "->", latent_height, latent_width)
 
     # [b, t*h*w, c*ph*pw] -> [b, t, h, w, c, ph, pw]
     x = x.reshape(b, t, h_patches, w_patches, c, PATCH_HEIGHT, PATCH_WIDTH)
-    ic("after reshape", x.shape)
 
     # [b, t, h, w, c, ph, pw] -> [b, c, t, h, ph, w, pw]
     x = x.permute(0, 4, 1, 2, 5, 3, 6).contiguous()
-    ic("after permute", x.shape)
 
     # [b, c, t, h, ph, w, pw] -> [b, c, t, h*ph, w*pw]
     x = x.reshape(b, c, t, latent_height, latent_width)
-    ic("unpack_latents output", x.shape)
     return x
