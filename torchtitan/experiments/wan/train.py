@@ -104,12 +104,8 @@ class WanTrainer(Trainer):
         with torch.no_grad():
             # Get empty string tokens
             t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
-            empty_t5_tokens = t5_tokenizer.encode("")
-            empty_clip_tokens = clip_tokenizer.encode("")
-            
-            # Convert to tensors and add batch dimension
-            empty_t5_tokens_tensor = torch.tensor([empty_t5_tokens], dtype=torch.int).to(device=self.device)
-            empty_clip_tokens_tensor = torch.tensor([empty_clip_tokens], dtype=torch.int).to(device=self.device)
+            empty_t5_tokens_tensor = t5_tokenizer.encode("").to(device=self.device)
+            empty_clip_tokens_tensor = clip_tokenizer.encode("").to(device=self.device)
             
             # Compute embeddings using the encoders (after FSDP wrapping)
             self._precomputed_t5_embedding = self.t5_encoder(empty_t5_tokens_tensor).to(dtype=self._dtype)

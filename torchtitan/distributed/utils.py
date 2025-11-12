@@ -303,10 +303,12 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
+    # Note: The 'ranks' parameter is accepted for API compatibility (e.g., for fault tolerance),
+    # but PyTorch's init_process_group() does not support a '_ranks' parameter in current versions.
+    # If rank filtering is needed, it should be handled at a higher level (e.g., via torchrun).
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
         timeout=timedelta(seconds=comm_config.init_timeout_seconds),
-        _ranks=ranks if ranks is not None else [],
     )
 
 

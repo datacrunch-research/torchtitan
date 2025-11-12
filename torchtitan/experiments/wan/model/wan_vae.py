@@ -1,3 +1,5 @@
+from torchtitan.tools.logging import logger
+
 from pydoc import cli
 import torch
 import torch.nn as nn
@@ -9,7 +11,6 @@ from typing import Optional
 from torchmetrics.functional.image import peak_signal_noise_ratio
 
 import os
-
 from icecream import ic 
 
 CACHE_T = 2
@@ -1708,14 +1709,14 @@ def load_wan_vae(
             sd = torch.load(chkpt_path, map_location=device, weights_only=False)
             # Debug: Print checkpoint structure
             if isinstance(sd, dict):
-                print(f"Checkpoint top-level keys: {list(sd.keys())[:20]}")  # Show first 20 keys
+                logger.debug(f"Checkpoint top-level keys: {list(sd.keys())[:20]}")  # Show first 20 keys
                 # Show sample of actual state dict keys
                 if len(sd) > 0:
                     first_key = list(sd.keys())[0]
-                    print(f"First checkpoint key: {first_key}")
+                    logger.debug(f"First checkpoint key: {first_key}")
                     # If it's a nested dict, show its keys
                     if isinstance(sd[first_key], dict):
-                        print(f"First key contains dict with keys: {list(sd[first_key].keys())[:10]}")
+                        logger.debug(f"First key contains dict with keys: {list(sd[first_key].keys())[:10]}")
             # If the checkpoint contains nested dicts (like 'model' key), extract the state dict
             if isinstance(sd, dict) and 'state_dict' in sd:
                 sd = sd['state_dict']
@@ -1727,25 +1728,25 @@ def load_wan_vae(
             if isinstance(sd, dict) and len(sd) > 0:
                 first_key = list(sd.keys())[0]
                 model_keys = list(vae.state_dict().keys())
-                print(f"Model expects keys like: {model_keys[:5]}...")
-                print(f"Checkpoint has keys like: {list(sd.keys())[:5]}...")
+                logger.debug(f"Model expects keys like: {model_keys[:5]}...")
+                logger.debug(f"Checkpoint has keys like: {list(sd.keys())[:5]}...")
                 
                 # Try to match prefixes
                 # If checkpoint keys start with 'model.' but our model doesn't, remove prefix
                 if first_key.startswith('model.') and not any(k.startswith('model.') for k in model_keys):
-                    print("Removing 'model.' prefix from checkpoint keys")
+                    logger.debug("Removing 'model.' prefix from checkpoint keys")
                     sd = {k.replace('model.', '', 1) if k.startswith('model.') else k: v for k, v in sd.items()}
                 # If checkpoint keys start with 'vae.' but our model doesn't, remove prefix
                 elif first_key.startswith('vae.') and not any(k.startswith('vae.') for k in model_keys):
-                    print("Removing 'vae.' prefix from checkpoint keys")
+                    logger.debug("Removing 'vae.' prefix from checkpoint keys")
                     sd = {k.replace('vae.', '', 1) if k.startswith('vae.') else k: v for k, v in sd.items()}
                 # If model expects 'model.' prefix but checkpoint doesn't have it, add prefix
                 elif any(k.startswith('model.') for k in model_keys) and not first_key.startswith('model.'):
-                    print("Adding 'model.' prefix to checkpoint keys")
+                    logger.debug("Adding 'model.' prefix to checkpoint keys")
                     sd = {f"model.{k}" if not k.startswith('model.') else k: v for k, v in sd.items()}
                 # If model expects 'vae.' prefix but checkpoint doesn't have it, add prefix
                 elif any(k.startswith('vae.') for k in model_keys) and not first_key.startswith('vae.'):
-                    print("Adding 'vae.' prefix to checkpoint keys")
+                    logger.debug("Adding 'vae.' prefix to checkpoint keys")
                     sd = {f"vae.{k}" if not k.startswith('vae.') else k: v for k, v in sd.items()}
         else:
             raise ValueError(
@@ -1754,9 +1755,9 @@ def load_wan_vae(
             )
         missing, unexpected = vae.load_state_dict(sd, strict=False, assign=True)
         if len(missing) > 0:
-            print(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
+            logger.debug(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
         if len(unexpected) > 0:
-            print(
+            logger.debug(
                 f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected)
             )
     return vae.to(dtype=dtype)

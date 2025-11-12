@@ -235,18 +235,18 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_cc12m_wds_data_processor,
     ),
-    # "cc12m-test": DatasetConfig(
-    #     path="tests/assets/cc12m_test",
-    #     loader=lambda path: load_dataset(
-    #         path, split="train", data_files={"train": "*.tar"}, streaming=True
-    #     ),
-    #     sample_processor=_cc12m_wds_data_processor,
-    # ),
-    # "coco-validation": DatasetConfig(
-    #     path="howard-hou/COCO-Text",
-    #     loader=lambda path: load_dataset(path, split="validation", streaming=True),
-    #     sample_processor=_coco_data_processor,
-    # ),
+    "cc12m-test": DatasetConfig(
+        path="tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*.tar"}, streaming=True
+        ),
+        sample_processor=_cc12m_wds_data_processor,
+    ),
+    "coco-validation": DatasetConfig(
+        path="howard-hou/COCO-Text",
+        loader=lambda path: load_dataset(path, split="validation", streaming=True),
+        sample_processor=_coco_data_processor,
+    ),
 }
 
 
@@ -593,18 +593,18 @@ def build_wan_dataloader(
             dp_world_size=dp_world_size,
             infinite=infinite,
         )
-    # else:
-    #     # Use WanDataset for HuggingFace datasets
-    #     ds = WanDataset(
-    #         dataset_name=dataset_name,
-    #         dataset_path=dataset_path,
-    #         t5_tokenizer=t5_tokenizer,
-    #         clip_tokenizer=clip_tokenizer,
-    #         job_config=job_config,
-    #         dp_rank=dp_rank,
-    #         dp_world_size=dp_world_size,
-    #         infinite=infinite,
-    #     )
+    else:
+        # Use WanDataset for HuggingFace datasets (e.g., cc12m-wds, coco-validation)
+        ds = WanDataset(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            t5_tokenizer=t5_tokenizer,
+            clip_tokenizer=clip_tokenizer,
+            job_config=job_config,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+        )
 
     return ParallelAwareDataloader(
         dataset=ds,

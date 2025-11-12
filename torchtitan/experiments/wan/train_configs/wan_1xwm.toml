@@ -70,7 +70,7 @@ async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [validation]
 enable = false
-dataset = "1x-wmds"  # Can use same dataset for validation
+dataset = "1xwm"  # Can use same dataset for validation
 dataset_path = "/path/to/world_model_raw_data/val_v2.0_raw"  # Validation dataset path
 local_batch_size = 1
 steps = 6   # Recommended value with the current settings and world_size=8

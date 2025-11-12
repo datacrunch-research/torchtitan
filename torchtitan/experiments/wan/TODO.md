@@ -1,4 +1,5 @@
 # Custom TorchTitan Wan 2.2 TI2V-5B model
+
 1. Select dataset -> In our case this is the 1x World Model dataset (+ other NVIDIA stuff)
 check what they did for FLUX
     1. So far we are relying on `decord` but there is also this [PyNvVideoCodec](https://developer.nvidia.com/pynvvideocodec)
@@ -13,3 +14,7 @@ What TorchTitan people had for FLUX.1:
 - Checkpointing: save and load DCP format checkpoint.
 - Classifier-free diffusion guidance support: We support classifier-free guidance for FLUX.1 models.
 
+
+- [x] add `wan_dataset` unit test
+- [ ] get the fwd pass
+    - currently is possible to run `torchrun --nproc_per_node=4 torchtitan/experiments/wan/train.py  --job.config_file torchtitan/experiments/wan/train_configs/wan_cc1xm.toml  2>&1 | tee debug.err`
