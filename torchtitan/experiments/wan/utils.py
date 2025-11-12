@@ -1,0 +1,320 @@
+import torch
+import os
+# from accelerate import Accelerator
+import numpy as np
+import random
+
+
+# def save_training_state(
+#     accelerator: Accelerator,
+#     optimizer,
+#     scheduler,
+#     epoch,
+#     output_path,
+#     psnr_value=None,
+#     step=None,
+# ):
+#     if Accelerator is None:
+#         raise ImportError("accelerate is required for save_training_state. Install it with: pip install accelerate")
+#     if accelerator.is_main_process:
+#         checkpoint_dir = os.path.join(output_path, f"checkpoint_epoch_{epoch}")
+#         os.makedirs(checkpoint_dir, exist_ok=True)
+
+#         training_state = {
+#             "epoch": epoch,
+#             "step": step,
+#             "optimizer_state_dict": optimizer.state_dict(),
+#             "scheduler_state_dict": scheduler.state_dict(),
+#             "torch_rng_state": torch.get_rng_state(),
+#             "accelerator_gradient_accumulation_steps": accelerator.gradient_accumulation_steps,
+#         }
+
+#         if psnr_value is not None:
+#             training_state["psnr_value"] = psnr_value
+#         if torch.cuda.is_available():
+#             training_state["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+
+#         training_state["numpy_rng_state"] = np.random.get_state()
+
+#         torch.save(training_state, os.path.join(checkpoint_dir, "training_state.pt"))
+
+#         accelerator.print(f"Training state saved to {checkpoint_dir}")
+#         return checkpoint_dir
+#     return None
+
+
+# def load_training_state(checkpoint_dir, optimizer, scheduler, accelerator):
+#     if Accelerator is None:
+#         raise ImportError("accelerate is required for load_training_state. Install it with: pip install accelerate")
+#     training_state_path = os.path.join(checkpoint_dir, "training_state.pt")
+#     if not os.path.exists(training_state_path):
+#         raise FileNotFoundError(f"Training state not found at {training_state_path}")
+
+#     accelerator.print(f"Loading training state from {training_state_path}")
+
+#     training_state = torch.load(
+#         training_state_path, map_location="cpu", weights_only=False
+#     )
+
+#     optimizer.load_state_dict(training_state["optimizer_state_dict"])
+#     scheduler.load_state_dict(training_state["scheduler_state_dict"])
+
+#     torch.set_rng_state(training_state["torch_rng_state"])
+
+#     if "cuda_rng_state" in training_state and torch.cuda.is_available():
+#         torch.cuda.set_rng_state_all(training_state["cuda_rng_state"])
+#     if "numpy_rng_state" in training_state:
+#         np.random.set_state(training_state["numpy_rng_state"])
+
+#     # Verify gradient accumulation steps match
+#     if (
+#         training_state.get("accelerator_gradient_accumulation_steps")
+#         != accelerator.gradient_accumulation_steps
+#     ):
+#         accelerator.print(
+#             f"Warning: Gradient accumulation steps mismatch. "
+#             f"Checkpoint: {training_state.get('accelerator_gradient_accumulation_steps')}, "
+#             f"Current: {accelerator.gradient_accumulation_steps}"
+#         )
+
+#     accelerator.print(f"Training state loaded successfully")
+
+#     return training_state.get("epoch", 0), training_state.get("step", 0)
+
+
+# def set_seed(seed: int = None):
+#     if seed is None or seed < 0:
+#         return
+#     else:
+#         random.seed(seed)
+#         np.random.seed(seed)
+#         torch.manual_seed(seed)
+#         torch.cuda.manual_seed(seed)
+#         torch.cuda.manual_seed_all(seed)
+
+#         # Make operations deterministic
+#         # torch.backends.cudnn.deterministic = True
+#         # torch.backends.cudnn.benchmark = False
+
+#         # Set environment variable for deterministic behavior
+#         os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from typing import Optional
+
+import torch
+
+from torch import Tensor
+
+from .model.autoencoder import AutoEncoder
+from .model.hf_embedder import WanEmbedder
+
+
+def preprocess_data(
+    # arguments from the recipe
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    # arguments from the config
+    autoencoder: Optional[AutoEncoder],
+    clip_encoder: WanEmbedder,
+    t5_encoder: WanEmbedder,
+    batch: dict[str, Tensor],
+    precomputed_t5_embedding: Optional[Tensor] = None,
+    precomputed_clip_embedding: Optional[Tensor] = None,
+) -> dict[str, Tensor]:
+    """
+    Take a batch of inputs and encoder as input and return a batch of preprocessed data.
+
+    Args:
+        device (torch.device): device to do preprocessing on
+        dtype (torch.dtype): data type to do preprocessing in
+        autoencoer(AutoEncoder): autoencoder to use for preprocessing
+        clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
+        t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
+        batch (dict[str, Tensor]): batch of data to preprocess. Tensor shape: [bsz, ...]
+        precomputed_t5_embedding (Optional[Tensor]): Precomputed T5 embedding for empty string [seq_len, hidden_dim]
+        precomputed_clip_embedding (Optional[Tensor]): Precomputed CLIP embedding for empty string [seq_len, hidden_dim]
+
+    Returns:
+        dict[str, Tensor]: batch of preprocessed data
+    """
+
+    clip_tokens = batch["clip_tokens"].squeeze(1).to(device=device, dtype=torch.int)
+    t5_tokens = batch["t5_tokens"].squeeze(1).to(device=device, dtype=torch.int)
+
+    # Check if we can use precomputed embeddings (when all tokens are empty strings)
+    # This allows T5 and CLIP encoders to be offloaded since we only encode ""
+    bsz = clip_tokens.shape[0]
+    
+    # Use precomputed embeddings if available and token sequence lengths match
+    # For the 1x-wmds dataset, we always use empty strings, so this optimization applies
+    if precomputed_t5_embedding is not None and precomputed_clip_embedding is not None:
+        # Check if token sequence lengths match precomputed embeddings
+        # If they match, we can use precomputed embeddings (saves encoder forward passes)
+        t5_seq_len_match = t5_tokens.shape[1] == precomputed_t5_embedding.shape[0]
+        clip_seq_len_match = clip_tokens.shape[1] == precomputed_clip_embedding.shape[0]
+        
+        if t5_seq_len_match:
+            # Expand precomputed T5 embedding to batch size: [seq_len, hidden_dim] -> [bsz, seq_len, hidden_dim]
+            t5_text_encodings = precomputed_t5_embedding.unsqueeze(0).expand(bsz, -1, -1).to(device=device, dtype=dtype)
+        else:
+            # Sequence length doesn't match, compute normally
+            t5_text_encodings = t5_encoder(t5_tokens)
+        
+        if clip_seq_len_match:
+            # Expand precomputed CLIP embedding to batch size: [seq_len, hidden_dim] -> [bsz, seq_len, hidden_dim]
+            clip_text_encodings = precomputed_clip_embedding.unsqueeze(0).expand(bsz, -1, -1).to(device=device, dtype=dtype)
+        else:
+            # Sequence length doesn't match, compute normally
+            clip_text_encodings = clip_encoder(clip_tokens)
+    else:
+        # No precomputed embeddings available, compute normally
+        clip_text_encodings = clip_encoder(clip_tokens)
+        t5_text_encodings = t5_encoder(t5_tokens)
+
+    if autoencoder is not None:
+        images = batch["image"].to(device=device, dtype=dtype)
+        img_encodings = autoencoder.encode(images)
+        batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
+
+    batch["clip_encodings"] = clip_text_encodings.to(dtype)
+    batch["t5_encodings"] = t5_text_encodings.to(dtype)
+
+    return batch
+
+
+def generate_noise_latent(
+    bsz: int,
+    height: int,
+    width: int,
+    device: str | torch.device,
+    dtype: torch.dtype,
+    seed: int | None = None,
+) -> Tensor:
+    """Generate noise latents for the Flux flow model. The random seed will be set at the beginning of training.
+
+    Args:
+        bsz (int): batch_size.
+        height (int): The height of the image.
+        width (int): The width of the image.
+        device (str | torch.device): The device to use.
+        dtype (torch.dtype): The dtype to use.
+
+    Returns:
+        Tensor: The noise latents.
+            Shape: [num_samples, LATENT_CHANNELS, height // IMG_LATENT_SIZE_RATIO, width // IMG_LATENT_SIZE_RATIO]
+
+    """
+    LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 16, 8
+    return torch.randn(
+        bsz,
+        LATENT_CHANNELS,
+        height // IMAGE_LATENT_SIZE_RATIO,
+        width // IMAGE_LATENT_SIZE_RATIO,
+        dtype=dtype,
+    ).to(device)
+
+
+def create_position_encoding_for_latents(
+    bsz: int, latent_height: int, latent_width: int, position_dim: int = 3
+) -> Tensor:
+    """
+    Create the packed latents' position encodings for the Flux flow model.
+
+    Args:
+        bsz (int): The batch size.
+        latent_height (int): The height of the latent.
+        latent_width (int): The width of the latent.
+
+    Returns:
+        Tensor: The position encodings.
+            Shape: [bsz, (latent_height // PATCH_HEIGHT) * (latent_width // PATCH_WIDTH), POSITION_DIM)
+    """
+    PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+
+    height = latent_height // PATCH_HEIGHT
+    width = latent_width // PATCH_WIDTH
+
+    position_encoding = torch.zeros(height, width, position_dim)
+
+    row_indices = torch.arange(height)
+    position_encoding[:, :, 1] = row_indices.unsqueeze(1)
+
+    col_indices = torch.arange(width)
+    position_encoding[:, :, 2] = col_indices.unsqueeze(0)
+
+    # Flatten and repeat for the full batch
+    # [height, width, 3] -> [bsz, height * width, 3]
+    position_encoding = position_encoding.view(1, height * width, position_dim)
+    position_encoding = position_encoding.repeat(bsz, 1, 1)
+
+    return position_encoding
+
+
+def pack_latents(x: Tensor) -> Tensor:
+    """
+    Rearrange latents from an image-like format into a sequence of patches.
+    Equivalent to `einops.rearrange("b c (h ph) (w pw) -> b (h w) (c ph pw)")`.
+
+    Args:
+        x (Tensor): The unpacked latents.
+            Shape: [bsz, ch, latent height, latent width]
+
+    Returns:
+        Tensor: The packed latents.
+            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+    """
+    PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+
+    b, c, latent_height, latent_width = x.shape
+    h = latent_height // PATCH_HEIGHT
+    w = latent_width // PATCH_WIDTH
+
+    # [b, c, h*ph, w*ph] -> [b, c, h, w, ph, pw]
+    x = x.unfold(2, PATCH_HEIGHT, PATCH_HEIGHT).unfold(3, PATCH_WIDTH, PATCH_WIDTH)
+
+    # [b, c, h, w, ph, PW] -> [b, h, w, c, ph, PW]
+    x = x.permute(0, 2, 3, 1, 4, 5)
+
+    # [b, h, w, c, ph, PW] -> [b, h*w, c*ph*PW]
+    return x.reshape(b, h * w, c * PATCH_HEIGHT * PATCH_WIDTH)
+
+
+def unpack_latents(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
+    """
+    Rearrange latents from a sequence of patches into an image-like format.
+    Equivalent to `einops.rearrange("b (h w) (c ph pw) -> b c (h ph) (w pw)")`.
+
+    Args:
+        x (Tensor): The packed latents.
+            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+        latent_height (int): The height of the unpacked latents.
+        latent_width (int): The width of the unpacked latents.
+
+    Returns:
+        Tensor: The unpacked latents.
+            Shape: [bsz, ch, latent height, latent width]
+    """
+    PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+
+    b, _, c_ph_pw = x.shape
+    h = latent_height // PATCH_HEIGHT
+    w = latent_width // PATCH_WIDTH
+    c = c_ph_pw // (PATCH_HEIGHT * PATCH_WIDTH)
+
+    # [b, h*w, c*ph*pw] -> [b, h, w, c, ph, pw]
+    x = x.reshape(b, h, w, c, PATCH_HEIGHT, PATCH_WIDTH)
+
+    # [b, h, w, c, ph, pw] -> [b, c, h, ph, w, pw]
+    x = x.permute(0, 3, 1, 4, 2, 5)
+
+    # [b, c, h, ph, w, pw] -> [b, c, h*ph, w*pw]
+    return x.reshape(b, c, h * PATCH_HEIGHT, w * PATCH_WIDTH)
