@@ -20,9 +20,9 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.wan.wan_datasets import build_wan_validation_dataloader
 from torchtitan.experiments.wan.inference.sampling import generate_image, save_image
-from torchtitan.experiments.wan.model.autoencoder import AutoEncoder
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 
+from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
 from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
 from torchtitan.experiments.wan.utils import (
     create_position_encoding_for_latents,
@@ -87,13 +87,13 @@ class WanValidator(Validator):
         self,
         device: torch.device,
         _dtype: torch.dtype,
-        autoencoder: AutoEncoder,
+        wan_video_vae: WanVideoVAE,
         t5_encoder: WanEmbedder,
         clip_encoder: WanEmbedder,
     ):
         self.device = device
         self._dtype = _dtype
-        self.autoencoder = autoencoder
+        self.wan_video_vae = wan_video_vae
         self.t5_encoder = t5_encoder
         self.clip_encoder = clip_encoder
 
@@ -139,7 +139,8 @@ class WanValidator(Validator):
                     job_config=self.job_config,
                     model=model,
                     prompt=p,
-                    autoencoder=self.autoencoder,
+                    # autoencoder=self.autoencoder,
+                    wan_video_vae=self.wan_video_vae,
                     t5_tokenizer=self.t5_tokenizer,
                     clip_tokenizer=self.clip_tokenizer,
                     t5_encoder=self.t5_encoder,

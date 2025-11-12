@@ -230,23 +230,23 @@ DATASETS = {
         loader=_load_raw_video_dataset,
         sample_processor=_process_raw_video_sample,
     ),
-    "cc12m-wds": DatasetConfig(
-        path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        sample_processor=_cc12m_wds_data_processor,
-    ),
-    "cc12m-test": DatasetConfig(
-        path="tests/assets/cc12m_test",
-        loader=lambda path: load_dataset(
-            path, split="train", data_files={"train": "*.tar"}, streaming=True
-        ),
-        sample_processor=_cc12m_wds_data_processor,
-    ),
-    "coco-validation": DatasetConfig(
-        path="howard-hou/COCO-Text",
-        loader=lambda path: load_dataset(path, split="validation", streaming=True),
-        sample_processor=_coco_data_processor,
-    ),
+    # "cc12m-wds": DatasetConfig(
+    #     path="pixparse/cc12m-wds",
+    #     loader=lambda path: load_dataset(path, split="train", streaming=True),
+    #     sample_processor=_cc12m_wds_data_processor,
+    # ),
+    # "cc12m-test": DatasetConfig(
+    #     path="tests/assets/cc12m_test",
+    #     loader=lambda path: load_dataset(
+    #         path, split="train", data_files={"train": "*.tar"}, streaming=True
+    #     ),
+    #     sample_processor=_cc12m_wds_data_processor,
+    # ),
+    # "coco-validation": DatasetConfig(
+    #     path="howard-hou/COCO-Text",
+    #     loader=lambda path: load_dataset(path, split="validation", streaming=True),
+    #     sample_processor=_coco_data_processor,
+    # ),
 }
 
 
@@ -394,10 +394,10 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
                 
                 # Yield the processed sample
                 # For video datasets, we might yield video_frames and robot_states separately
-                video_frames = sample_dict.pop("video_frames")
-                robot_states = sample_dict.pop("robot_states")
+                video_frames = sample_dict["video_frames"] # TODO: is this zero copy?
+                # robot_states = sample_dict.pop("robot_states")
                 
-                yield sample_dict, (video_frames, robot_states)
+                yield sample_dict, video_frames
             
             if not self.infinite:
                 logger.warning(
@@ -429,138 +429,6 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
 
 
 
-class WanDataset(IterableDataset, Stateful):
-    """Dataset for FLUX text-to-image model.
-
-    Args:
-    dataset_name (str): Name of the dataset.
-    dataset_path (str): Path to the dataset.
-    model_transform (Transform): Callable that applies model-specific preprocessing to the sample.
-    dp_rank (int): Data parallel rank.
-    dp_world_size (int): Data parallel world size.
-    infinite (bool): Whether to loop over the dataset infinitely.
-    """
-
-    def __init__(
-        self,
-        dataset_name: str,
-        dataset_path: Optional[str],
-        t5_tokenizer: BaseTokenizer,
-        clip_tokenizer: BaseTokenizer,
-        job_config: Optional[JobConfig] = None,
-        dp_rank: int = 0,
-        dp_world_size: int = 1,
-        infinite: bool = False,
-    ) -> None:
-
-        # Force lowercase for consistent comparison
-        dataset_name = dataset_name.lower()
-
-        path, dataset_loader, data_processor = _validate_dataset(
-            dataset_name, dataset_path
-        )
-        ds = dataset_loader(path)
-
-        self.dataset_name = dataset_name
-        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
-
-        self._t5_tokenizer = t5_tokenizer
-        self._t5_empty_token = t5_tokenizer.encode("")
-        self._clip_tokenizer = clip_tokenizer
-        self._clip_empty_token = clip_tokenizer.encode("")
-        self._data_processor = data_processor
-        self.job_config = job_config
-
-        self.infinite = infinite
-
-        # Variables for checkpointing
-        self._sample_idx = 0
-        self._all_samples: list[dict[str, Any]] = []
-
-    def _get_data_iter(self):
-        if isinstance(self._data, Dataset):
-            if self._sample_idx == len(self._data):
-                return iter([])
-            else:
-                return iter(self._data.skip(self._sample_idx))
-
-        return iter(self._data)
-
-    def __iter__(self):
-        dataset_iterator = self._get_data_iter()
-        while True:
-            # TODO: Add support for robust data loading and error handling.
-            # Currently, we assume the dataset is well-formed and does not contain corrupted samples.
-            # If a corrupted sample is encountered, the program will crash and throw an exception.
-            # You can NOT try to catch the exception and continue, because the iterator within dataset
-            # is not broken after raising an exception, so calling next() will throw StopIteration and might cause re-loop.
-            try:
-                sample = next(dataset_iterator)
-            except StopIteration:
-                # We are asumming the program hits here only when reaching the end of the dataset.
-                if not self.infinite:
-                    logger.warning(
-                        f"Dataset {self.dataset_name} has run out of data. \
-                         This might cause NCCL timeout if data parallelism is enabled."
-                    )
-                    break
-                else:
-                    # Reset offset for the next iteration if infinite
-                    self._sample_idx = 0
-                    logger.warning(f"Dataset {self.dataset_name} is being re-looped.")
-                    dataset_iterator = self._get_data_iter()
-                    if not isinstance(self._data, Dataset):
-                        if hasattr(self._data, "set_epoch") and hasattr(
-                            self._data, "epoch"
-                        ):
-                            self._data.set_epoch(self._data.epoch + 1)
-                    continue
-
-            # Use the dataset-specific preprocessor
-            sample_dict = self._data_processor(
-                sample,
-                self._t5_tokenizer,
-                self._clip_tokenizer,
-                output_size=self.job_config.training.img_size,
-            )
-
-            # skip low quality image or image with color channel = 1
-            if sample_dict["image"] is None:
-                sample = sample.get("__key__", "unknown")
-                logger.warning(
-                    f"Low quality image {sample} is skipped in Flux Dataloader."
-                )
-                continue
-
-            # Classifier-free guidance: Replace some of the strings with empty strings.
-            # Distinct random seed is initialized at the beginning of training for each FSDP rank.
-            dropout_prob = self.job_config.training.classifier_free_guidance_prob
-            if dropout_prob > 0.0:
-                if torch.rand(1).item() < dropout_prob:
-                    sample_dict["t5_tokens"] = self._t5_empty_token
-                if torch.rand(1).item() < dropout_prob:
-                    sample_dict["clip_tokens"] = self._clip_empty_token
-
-            self._sample_idx += 1
-
-            labels = sample_dict.pop("image")
-
-            yield sample_dict, labels
-
-    def load_state_dict(self, state_dict):
-        if isinstance(self._data, Dataset):
-            self._sample_idx = state_dict["sample_idx"]
-        else:
-            assert "data" in state_dict
-            self._data.load_state_dict(state_dict["data"])
-
-    def state_dict(self):
-        if isinstance(self._data, Dataset):
-            return {"sample_idx": self._sample_idx}
-        else:
-            return {"data": self._data.state_dict()}
-
-
 def build_wan_dataloader(
     dp_world_size: int,
     dp_rank: int,
@@ -570,10 +438,9 @@ def build_wan_dataloader(
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
     """
-    Build a data loader for WAN datasets.
+    Build a data loader for WAN video datasets.
     
-    Supports both HuggingFace datasets (via WanDataset) and RawVideoDataset
-    (via RawVideoDatasetWrapper).
+    Currently only supports 1xwm dataset via RawVideoDatasetWrapper.
     """
     dataset_name = job_config.training.dataset.lower()
     dataset_path = job_config.training.dataset_path
@@ -581,30 +448,22 @@ def build_wan_dataloader(
 
     t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
 
-    # Use RawVideoDatasetWrapper for video datasets
-    if dataset_name == "1xwm":
-        ds = RawVideoDatasetWrapper(
-            dataset_name=dataset_name,
-            dataset_path=dataset_path,
-            t5_tokenizer=t5_tokenizer,
-            clip_tokenizer=clip_tokenizer,
-            job_config=job_config,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            infinite=infinite,
+    # Only support 1xwm video dataset
+    if dataset_name != "1xwm":
+        raise ValueError(
+            f"Unsupported dataset: {dataset_name}. Only '1xwm' is currently supported."
         )
-    else:
-        # Use WanDataset for HuggingFace datasets (e.g., cc12m-wds, coco-validation)
-        ds = WanDataset(
-            dataset_name=dataset_name,
-            dataset_path=dataset_path,
-            t5_tokenizer=t5_tokenizer,
-            clip_tokenizer=clip_tokenizer,
-            job_config=job_config,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            infinite=infinite,
-        )
+
+    ds = RawVideoDatasetWrapper(
+        dataset_name=dataset_name,
+        dataset_path=dataset_path,
+        t5_tokenizer=t5_tokenizer,
+        clip_tokenizer=clip_tokenizer,
+        job_config=job_config,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=infinite,
+    )
 
     return ParallelAwareDataloader(
         dataset=ds,
@@ -612,57 +471,6 @@ def build_wan_dataloader(
         dp_world_size=dp_world_size,
         batch_size=batch_size,
     )
-
-
-class WanValidationDataset(WanDataset):
-    """
-    Adds logic to generate timesteps for flux validation method described in SD3 paper
-
-    Args:
-    generate_timesteps (bool): Generate stratified timesteps in round-robin style for validation
-    """
-
-    def __init__(
-        self,
-        dataset_name: str,
-        dataset_path: Optional[str],
-        t5_tokenizer: BaseTokenizer,
-        clip_tokenizer: BaseTokenizer,
-        job_config: Optional[JobConfig] = None,
-        dp_rank: int = 0,
-        dp_world_size: int = 1,
-        generate_timesteps: bool = True,
-        infinite: bool = False,
-    ) -> None:
-        # Call parent constructor correctly
-        super().__init__(
-            dataset_name=dataset_name,
-            dataset_path=dataset_path,
-            t5_tokenizer=t5_tokenizer,
-            clip_tokenizer=clip_tokenizer,
-            job_config=job_config,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            infinite=infinite,
-        )
-
-        # Initialize timestep generation for validation
-        self.generate_timesteps = generate_timesteps
-        if self.generate_timesteps:
-            # Generate stratified timesteps as described in SD3 paper
-            val_timesteps = [1 / 8 * (i + 0.5) for i in range(8)]
-            self.timestep_cycle = itertools.cycle(val_timesteps)
-
-    def __iter__(self):
-        # Get parent iterator and add timesteps to each sample
-        parent_iterator = super().__iter__()
-
-        for sample_dict, labels in parent_iterator:
-            # Add timestep to the sample dict if timestep generation is enabled
-            if self.generate_timesteps:
-                sample_dict["timestep"] = next(self.timestep_cycle)
-
-            yield sample_dict, labels
 
 
 def build_wan_validation_dataloader(
@@ -674,14 +482,24 @@ def build_wan_validation_dataloader(
     generate_timestamps: bool = True,
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets."""
-    dataset_name = job_config.validation.dataset
+    """
+    Build a data loader for WAN video validation datasets.
+    
+    Currently only supports 1xwm dataset via RawVideoDatasetWrapper.
+    """
+    dataset_name = job_config.validation.dataset.lower()
     dataset_path = job_config.validation.dataset_path
     batch_size = job_config.validation.local_batch_size
 
     t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
 
-    ds = WanValidationDataset(
+    # Only support 1xwm video dataset
+    if dataset_name != "1xwm":
+        raise ValueError(
+            f"Unsupported validation dataset: {dataset_name}. Only '1xwm' is currently supported."
+        )
+
+    ds = RawVideoDatasetWrapper(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         t5_tokenizer=t5_tokenizer,
@@ -689,7 +507,6 @@ def build_wan_validation_dataloader(
         job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        generate_timesteps=generate_timestamps,
         infinite=infinite,
     )
 

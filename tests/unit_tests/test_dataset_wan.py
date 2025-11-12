@@ -95,11 +95,14 @@ class TestWanDataLoader(unittest.TestCase):
                 it = iter(dl)
 
                 for i in range(0, num_steps):
-                    input_data, (videos, states) = next(it)
+                    input_data, videos = next(it)
+                    
+                    # Extract robot_states from input_data
+                    states = input_data["robot_states"]
 
                     assert (
-                        len(input_data) == 3
-                    )  # (clip_encodings, t5_encodings, prompt)
+                        len(input_data) == 5
+                    )  # (clip_tokens, t5_tokens, prompt, robot_states, video_frames)
                     # TODO: update this to be just t5_encodings and allow to have them to be fixed to "" encoding
                     assert videos.shape == (batch_size, num_frames, H, W, C)
                     assert states.shape == (batch_size, num_frames, 25)
@@ -131,9 +134,11 @@ class TestWanDataLoader(unittest.TestCase):
                     # Set torch manual seed before each dataloader iteration to ensure consistent randomness
                     # across dataloaders for testing purposes.
                     torch.manual_seed(i)
-                    expected_input_ids, (expected_videos, expected_states) = next(it)
+                    expected_input_ids, expected_videos = next(it)
+                    expected_states = expected_input_ids["robot_states"]
                     torch.manual_seed(i)
-                    input_ids, (videos, states) = next(it_resumed)
+                    input_ids, videos = next(it_resumed)
+                    states = input_ids["robot_states"]
 
                     assert torch.equal(
                         input_ids["clip_tokens"], expected_input_ids["clip_tokens"]

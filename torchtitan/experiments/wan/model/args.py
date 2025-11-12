@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.experiments.wan.model.autoencoder import AutoEncoderParams
 
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
@@ -29,7 +28,6 @@ class WanModelArgs(BaseModelArgs):
     axes_dim: tuple = (16, 56, 56)
     theta: int = 10_000
     qkv_bias: bool = True
-    autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
     wan_video_vae_params: WanVAEParams = field(default_factory=lambda: WanVAEParams(vae_type="38", z_dim=48))
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:

@@ -5,15 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Optional
+from typing import Iterable, Optional
+import time
+
 
 import torch
 
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.tools import utils
+from torchtitan.components.dataloader import DataloaderExhaustedError
+
+
 
 from torchtitan.experiments.wan.infra.parallelize import parallelize_encoders
-from torchtitan.experiments.wan.model.autoencoder import load_ae
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.utils import (
     create_position_encoding_for_latents,
@@ -56,13 +61,13 @@ class WanTrainer(Trainer):
 
         # load components
         model_args = self.train_spec.model_args[job_config.model.flavor]
-        self.autoencoder = load_ae(
-            job_config.encoder.autoencoder_path,
-            model_args.autoencoder_params,
-            device=self.device,
-            dtype=self._dtype,
-            random_init=job_config.training.test_mode,
-        )
+        # self.autoencoder = load_ae(
+        #     job_config.encoder.autoencoder_path,
+        #     model_args.autoencoder_params,
+        #     device=self.device,
+        #     dtype=self._dtype,
+        #     random_init=job_config.training.test_mode,
+        # )
         self.wan_video_vae = load_wan_vae(
             job_config.encoder.wan_vae_path,
             model_args.wan_video_vae_params,
@@ -114,28 +119,65 @@ class WanTrainer(Trainer):
             self.validator.wan_init(
                 device=self.device,
                 _dtype=self._dtype,
-                autoencoder=self.autoencoder,
+                # autoencoder=self.autoencoder,
+                wan_video_vae=self.wan_video_vae,
                 t5_encoder=self.t5_encoder,
                 clip_encoder=self.clip_encoder,
             )
             # TODO: also here add the validation code for wan
 
+    
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """Returns an iterator that processes batches from the data iterator."""
+        device_type = utils.device_type
+        data_iterator = iter(data_iterable)
+
+        while True:
+            data_load_start = time.perf_counter()
+            try:
+                batch = next(data_iterator)
+            except StopIteration as ex:
+                # If data runs out during gradient accumulation, that
+                # entire step will not be executed.
+                raise DataloaderExhaustedError() from ex
+            input_dict, labels = batch
+            ic(labels.shape)
+            ic(labels.device)
+            ic(labels.dtype)
+            ntokens_batch = labels.numel()
+            ic(ntokens_batch)
+            ic(self.ntokens_seen)
+            self.ntokens_seen += ntokens_batch
+            self.metrics_processor.ntokens_since_last_log += ntokens_batch
+            self.metrics_processor.data_loading_times.append(
+                time.perf_counter() - data_load_start
+            )
+
+            # Move tensors to the appropriate device
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(device_type)
+            labels = labels.to(device_type)
+
+            yield input_dict, labels
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
+        logger.info(input_dict.keys())
         # generate t5 and clip embeddings
-        input_dict["image"] = labels
         input_dict = preprocess_data(
             device=self.device,
             dtype=self._dtype,
-            autoencoder=self.autoencoder,
+            wan_video_vae=self.wan_video_vae,
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
             batch=input_dict,
             precomputed_t5_embedding=self._precomputed_t5_embedding,
             precomputed_clip_embedding=self._precomputed_clip_embedding,
         )
-        labels = input_dict["img_encodings"]
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -143,9 +185,9 @@ class WanTrainer(Trainer):
         model = self.model_parts[0]
         # TODO: same for Wan's DiT?
 
-        # image in latent space transformed by self.auto_encoder
         clip_encodings = input_dict["clip_encodings"]
         t5_encodings = input_dict["t5_encodings"]
+        labels = input_dict["latents"]
 
         bsz = labels.shape[0]
 
@@ -155,8 +197,11 @@ class WanTrainer(Trainer):
             sigmas = timesteps.view(-1, 1, 1, 1)
             latents = (1 - sigmas) * labels + sigmas * noise
         # TODO: keep in mind the masking of the latents
+        logger.info(f"latents shape: {latents.shape}")
+        logger.info(f"latents device: {latents.device}")
+        logger.info(f"latents dtype: {latents.dtype}")
 
-        bsz, _, latent_height, latent_width = latents.shape
+        bsz, _, _, latent_height, latent_width = latents.shape
 
         POSITION_DIM = 3  # constant for Flux flow model
         with torch.no_grad(), torch.device(self.device):
@@ -195,6 +240,9 @@ class WanTrainer(Trainer):
         )
         with self.train_context(optional_context_parallel_ctx):
             with self.maybe_enable_amp:
+                # TODO: WE ARE HERE! 
+                logger.info("We reached the forward pass!")
+                exit()
                 latent_noise_pred = model(
                     img=latents,
                     img_ids=latent_pos_enc,
@@ -221,6 +269,7 @@ class WanTrainer(Trainer):
 
 if __name__ == "__main__":
     init_logger()
+    logger.debug("Starting training script")
     config_manager = ConfigManager()
     config = config_manager.parse_args()
     trainer: Optional[WanTrainer] = None

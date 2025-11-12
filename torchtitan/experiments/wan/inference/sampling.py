@@ -17,7 +17,7 @@ from torch import Tensor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 
-from torchtitan.experiments.wan.model.autoencoder import AutoEncoder
+from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.model.model import WanModel
 from torchtitan.experiments.wan.utils import (
@@ -77,7 +77,7 @@ def generate_image(
     job_config: JobConfig,
     model: WanModel,
     prompt: str | list[str],
-    autoencoder: AutoEncoder,
+    wan_video_vae: WanVideoVAE,
     t5_tokenizer: BaseTokenizer,
     clip_tokenizer: BaseTokenizer,
     t5_encoder: WanEmbedder,
@@ -139,7 +139,7 @@ def generate_image(
             },
         )
 
-    img = denoise(
+    video = denoise(
         device=device,
         dtype=dtype,
         model=model,
@@ -158,8 +158,9 @@ def generate_image(
         classifier_free_guidance_scale=job_config.validation.classifier_free_guidance_scale,
     )
 
-    img = autoencoder.decode(img)
-    return img
+    # img = autoencoder.decode(img)
+    video = wan_video_vae.decode(video, device=device)
+    return video
 
 
 def denoise(

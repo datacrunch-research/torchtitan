@@ -17,7 +17,6 @@ from torchtitan.experiments.wan.wan_datasets import build_wan_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_wan
 from .model.args import WanModelArgs
-from .model.autoencoder import AutoEncoderParams
 from .model.model import WanModel
 from .model.state_dict_adapter import WanStateDictAdapter
 from .model.wan_vae import WanVAEParams
@@ -45,18 +44,11 @@ wan_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        autoencoder_params=AutoEncoderParams(
-            resolution=256,
-            in_channels=3,
-            ch=128,
-            out_ch=3,
-            ch_mult=(1, 2, 4, 4),
-            num_res_blocks=2,
-            z_channels=16,
-            scale_factor=0.3611,
-            shift_factor=0.1159,
+        wan_video_vae_params=WanVAEParams(
+            vae_type="38",
+            z_dim=48,
+            dim=160,
         ),
-        wan_video_vae_params=WanVAEParams(vae_type="38", z_dim=48, dim=160),
     ),
 }
 

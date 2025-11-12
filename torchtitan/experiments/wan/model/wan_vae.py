@@ -7,9 +7,21 @@ from einops import rearrange, repeat
 from safetensors.torch import load_file as load_sft
 from typing import Optional
 from torchmetrics.functional.image import peak_signal_noise_ratio
+from torchtitan.tools.logging import logger
 
 import os
-from icecream import ic 
+from icecream import ic
+
+# Configure icecream debug prints (works independently of logging level)
+# By default, icecream is enabled and outputs to stderr (works with 2>&1 redirection)
+# Set IC_DISABLE=1 to disable icecream output
+# Set IC_CONTEXT=1 to include file/line context in output
+# if os.environ.get("IC_DISABLE", "0") != "1":
+#     include_context = os.environ.get("IC_CONTEXT", "0") == "1"
+#     ic.configureOutput(includeContext=include_context)
+# else:
+#     # Disable icecream if explicitly requested
+#     ic.disable()
 
 CACHE_T = 2
 
@@ -291,6 +303,85 @@ class Resample38(Resample):
         else:
             self.resample = nn.Identity()
 
+    def forward(self, x, feat_cache=None, feat_idx=[0]):
+        """Forward pass for Resample38, matching parent Resample.forward() logic."""
+        b, c, t, h, w = x.size()
+        
+        # Handle temporal upsampling for upsample3d mode (before spatial resampling)
+        if self.mode == "upsample3d":
+            if feat_cache is not None:
+                idx = feat_idx[0]
+                if feat_cache[idx] is None:
+                    feat_cache[idx] = "Rep"
+                    feat_idx[0] += 1
+                else:
+                    cache_x = x[:, :, -CACHE_T:, :, :].clone()
+                    if (
+                        cache_x.shape[2] < 2
+                        and feat_cache[idx] is not None
+                        and feat_cache[idx] != "Rep"
+                    ):
+                        cache_x = torch.cat(
+                            [
+                                feat_cache[idx][:, :, -1, :, :]
+                                .unsqueeze(2)
+                                .to(cache_x.device),
+                                cache_x,
+                            ],
+                            dim=2,
+                        )
+                    if (
+                        cache_x.shape[2] < 2
+                        and feat_cache[idx] is not None
+                        and feat_cache[idx] == "Rep"
+                    ):
+                        cache_x = torch.cat(
+                            [torch.zeros_like(cache_x).to(cache_x.device), cache_x],
+                            dim=2,
+                        )
+                    if feat_cache[idx] == "Rep":
+                        x = self.time_conv(x)
+                    else:
+                        x = self.time_conv(x, feat_cache[idx])
+                    feat_cache[idx] = cache_x
+                    feat_idx[0] += 1
+
+                    x = x.reshape(b, 2, c, t, h, w)
+                    x = torch.stack((x[:, 0, :, :, :, :], x[:, 1, :, :, :, :]), 3)
+                    x = x.reshape(b, c, t * 2, h, w)
+        
+        # Apply spatial downsampling (or upsampling)
+        t = x.shape[2]
+        x = rearrange(x, "b c t h w -> (b t) c h w")
+        x = self.resample(x)
+        x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
+        
+        # Handle temporal downsampling for downsample3d mode (after spatial resampling)
+        if self.mode == "downsample3d":
+            if feat_cache is not None:
+                idx = feat_idx[0]
+                if feat_cache[idx] is None:
+                    feat_cache[idx] = x.clone()
+                    feat_idx[0] += 1
+                else:
+                    cache_x = x[:, :, -1:, :, :].clone()
+                    cached_frame = feat_cache[idx][:, :, -1:, :, :]
+                    x_concat = torch.cat([cached_frame, x], 2)
+                    x = self.time_conv(x_concat)
+                    feat_cache[idx] = cache_x
+                    feat_idx[0] += 1
+            else:
+                # When feat_cache is None, still apply temporal downsampling
+                # Pad temporal dimension to be divisible by stride
+                t_curr = x.shape[2]
+                pad_t = (2 - t_curr % 2) % 2
+                if pad_t > 0:
+                    x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
+                # Apply temporal convolution with stride 2
+                x = self.time_conv(x)
+        
+        return x
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_dim, out_dim, dropout=0.0):
@@ -509,10 +600,21 @@ class Down_ResidualBlock(nn.Module):
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         x_copy = x.clone()
-        for module in self.downsamples:
+        
+        # Process through downsample modules
+        for i, module in enumerate(self.downsamples):
             x = module(x, feat_cache, feat_idx)
 
-        return x + self.avg_shortcut(x_copy)
+        # Compute shortcut path
+        x_shortcut = self.avg_shortcut(x_copy)
+        
+        # Handle temporal dimension mismatch: if shapes don't match, interpolate shortcut
+        if x.shape[2] != x_shortcut.shape[2]:
+            # Interpolate shortcut to match main path's temporal dimension
+            x_shortcut = torch.nn.functional.interpolate(
+                x_shortcut, size=(x.shape[2], x.shape[3], x.shape[4]), mode='trilinear', align_corners=False
+            )
+        return x + x_shortcut
 
 
 class Up_ResidualBlock(nn.Module):
@@ -1151,7 +1253,7 @@ class VideoVAE_(nn.Module):
 
 
 class WanVideoVAE(nn.Module):
-    def __init__(self, z_dim=16):
+    def __init__(self, z_dim=16, torch_dtype=torch.bfloat16):
         super().__init__()        
         mean = [
             -0.7571,
@@ -1189,8 +1291,8 @@ class WanVideoVAE(nn.Module):
             2.8251,
             1.9160,
         ]
-        self.mean = torch.tensor(mean)
-        self.std = torch.tensor(std)
+        self.mean = torch.tensor(mean, dtype=torch_dtype)
+        self.std = torch.tensor(std, dtype=torch_dtype)
         self.scale = [self.mean, 1.0 / self.std]
 
         # init model
@@ -1372,9 +1474,9 @@ class WanVideoVAE(nn.Module):
     def encode(
         self, videos, device, tiled=False, tile_size=(34, 34), tile_stride=(18, 16)
     ):
-        # ic(videos.shape)
-        # videos = [video.to("cpu") for video in videos]
-        # ic(device)
+        # TODO: Refactor to accept tensor (B, C, T, H, W) directly instead of list
+        # Currently accepts both list of (C, T, H, W) tensors or single (B, C, T, H, W) tensor
+        # Should standardize on tensor input for better performance and cleaner API
         videos = [video.to(device) for video in videos]
         hidden_states = []
         for video in videos:
@@ -1404,6 +1506,9 @@ class WanVideoVAE(nn.Module):
         tile_size=(34, 34),
         tile_stride=(18, 16),
     ):
+        # TODO: Refactor to accept tensor (B, C, T, H, W) directly instead of list
+        # Currently accepts both list of (C, T, H, W) tensors or single (B, C, T, H, W) tensor
+        # Should standardize on tensor input for better performance and cleaner API
         # hidden_states = [hidden_state.to("cpu") for hidden_state in hidden_states]
         hidden_states = [hidden_state.to(device) for hidden_state in hidden_states]
         videos = []
@@ -1545,8 +1650,8 @@ class VideoVAE38_(VideoVAE_):
 
 
 class WanVideoVAE38(WanVideoVAE):
-    def __init__(self, z_dim=48, dim=160):
-        super().__init__()
+    def __init__(self, z_dim=48, dim=160, torch_dtype=torch.bfloat16):
+        super().__init__(torch_dtype=torch_dtype)
 
         mean = [
             -0.2289,
@@ -1648,8 +1753,9 @@ class WanVideoVAE38(WanVideoVAE):
             0.7468,
             0.7744,
         ]
-        self.mean = torch.tensor(mean)
-        self.std = torch.tensor(std)
+        # Use the same dtype as the parent class (torch_dtype parameter)
+        self.mean = torch.tensor(mean, dtype=torch_dtype)
+        self.std = torch.tensor(std, dtype=torch_dtype)
         self.scale = [self.mean, 1.0 / self.std]
 
         # init model
@@ -1683,12 +1789,12 @@ def load_wan_vae(
         z_dim = wan_vae_params.z_dim if wan_vae_params.z_dim != 16 else 48
         dim = wan_vae_params.dim if wan_vae_params.dim is not None else 160
         with torch.device(device):
-            vae = WanVideoVAE38(z_dim=z_dim, dim=dim)
+            vae = WanVideoVAE38(z_dim=z_dim, dim=dim, torch_dtype=dtype)
     else:
         # Load standard WanVideoVAE
         z_dim = wan_vae_params.z_dim
         with torch.device(device):
-            vae = WanVideoVAE(z_dim=z_dim)
+            vae = WanVideoVAE(z_dim=z_dim, torch_dtype=dtype)
 
     if random_init:
         return vae.to(dtype=dtype)
@@ -1763,14 +1869,6 @@ def load_wan_vae(
 def main():
     params_38 = WanVAEParams(vae_type="38", z_dim=48)
     vae_38 = load_wan_vae("/root/torchtitan/Wan2.2-TI2V-5B/Wan2.2_VAE.pth", params_38, device="cuda")
-    ic(vae_38)
-    ic(next(vae_38.parameters()).device)
-    ic(next(vae_38.parameters()).dtype)
-    
-    # Debug: Check if weights were loaded correctly
-    # Sample a few parameter values to verify they're not all zeros or random
-    sample_param = list(vae_38.model.encoder.conv1.parameters())[0]
-    ic(f"Sample encoder conv1 weight stats: mean={sample_param.mean().item():.6f}, std={sample_param.std().item():.6f}, min={sample_param.min().item():.6f}, max={sample_param.max().item():.6f}")
 
     from dataset import RawVideoDataset
     from torch.utils.data import DataLoader
@@ -1804,17 +1902,11 @@ def main():
             videos=input_video.transpose(1, 2),
             device=device,
         )
-        ic(latents.device)
-        ic(latents.shape)
-        ic(latents.dtype)
 
         pred_video = vae_38.decode(
             hidden_states=latents,
             device=device
         )
-        ic(pred_video.shape)
-        ic(pred_video.device)
-        ic(pred_video.dtype)
         
         # Compute PSNR across frames
         # input_video: (B, T, C, H, W), pred_video: (B, C, T, H, W)
@@ -1834,8 +1926,6 @@ def main():
             # Extract frame t: (B, C, H, W)
             input_frame = input_video_float[:, t, :, :, :]  # (B, C, H, W)
             pred_frame = pred_video_float[:, t, :, :, :]     # (B, C, H, W)
-            ic(input_frame.shape)
-            ic(pred_frame.shape)
             # Compute PSNR for this frame across batch
             # Reduce over channels, height, width (dim 1, 2, 3) to keep batch dimension
             psnr_frame = peak_signal_noise_ratio(
@@ -1853,9 +1943,7 @@ def main():
         
         # Stack to get (T, B) then transpose to (B, T)
         if len(psnr_values) > 0:
-            ic(f"First psnr_frame shape: {psnr_values[0].shape}")
             psnr_values = torch.stack(psnr_values, dim=0)  # (T, B)
-            ic(f"After stack shape: {psnr_values.shape}")
             # Transpose to get (B, T)
             if psnr_values.dim() == 2:
                 psnr_values = psnr_values.transpose(0, 1)  # (B, T)

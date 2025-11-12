@@ -10,8 +10,10 @@ import torch
 
 from torch import Tensor
 
-from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import WanEmbedder
+from .model.wan_vae import WanVideoVAE
+from icecream import ic
+from torchtitan.tools.logging import logger
 
 
 def preprocess_data(
@@ -20,7 +22,7 @@ def preprocess_data(
     dtype: torch.dtype,
     *,
     # arguments from the config
-    autoencoder: Optional[AutoEncoder],
+    wan_video_vae: WanVideoVAE,
     clip_encoder: WanEmbedder,
     t5_encoder: WanEmbedder,
     batch: dict[str, Tensor],
@@ -77,10 +79,37 @@ def preprocess_data(
         clip_text_encodings = clip_encoder(clip_tokens)
         t5_text_encodings = t5_encoder(t5_tokens)
 
-    if autoencoder is not None:
-        images = batch["image"].to(device=device, dtype=dtype)
-        img_encodings = autoencoder.encode(images)
-        batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
+    # Move videos to device and convert to proper dtype
+    # Videos come from dataloader as (batch_size, num_frames, height, width, channels)
+    videos = batch["video_frames"].to(device=device, dtype=dtype)
+    
+    # Permute from (B, T, H, W, C) to (B, T, C, H, W)
+    videos = videos.permute(0, 1, 4, 2, 3)
+    logger.info(videos.shape)
+    logger.info(videos.device)
+    logger.info(videos.dtype)
+    # Normalize video frames from [0, 255] range to [-1, 1] range
+    # This is required because the VAE expects input in [-1, 1] range
+    max_value = 1.0
+    min_value = -1.0
+    videos = videos * ((max_value - min_value) / 255.0) + min_value
+    logger.info(videos.device)
+    logger.info(videos.dtype)
+    # Transpose from (B, T, C, H, W) to (B, C, T, H, W) for VAE encoding
+    # The VAE encode method can accept either a tensor (B, C, T, H, W) or a list of (C, T, H, W) tensors
+    # Following wan_video_1x.py pattern, we pass the tensor directly
+    videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
+    logger.info(f"After transpose: {videos.shape}")
+    
+    # Encode videos to latents using the WAN Video VAE
+    # The encode method will automatically iterate over the batch dimension if given a tensor
+    video_latents = wan_video_vae.encode(
+        videos,  # Pass tensor directly, method handles batch dimension
+        device=device,
+        tiled=False,
+    )
+    batch["latents"] = video_latents.to(device=device, dtype=dtype)
+
 
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
@@ -158,60 +187,74 @@ def create_position_encoding_for_latents(
 
 def pack_latents(x: Tensor) -> Tensor:
     """
-    Rearrange latents from an image-like format into a sequence of patches.
-    Equivalent to `einops.rearrange("b c (h ph) (w pw) -> b (h w) (c ph pw)")`.
+    Rearrange video latents from (B, C, T, H, W) format into a sequence of patches.
+    Packs spatial patches (2x2) while keeping temporal dimension separate.
+    Equivalent to `einops.rearrange("b c t (h ph) (w pw) -> b (t h w) (c ph pw)")`.
 
     Args:
-        x (Tensor): The unpacked latents.
-            Shape: [bsz, ch, latent height, latent width]
+        x (Tensor): The unpacked video latents.
+            Shape: [bsz, channels, temporal, latent_height, latent_width]
 
     Returns:
         Tensor: The packed latents.
-            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+            Shape: (bsz, (temporal * latent_height // 2 * latent_width // 2), channels * 4)
     """
     PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+    ic("pack_latents input", x.shape)
+    b, c, t, h, w = x.shape
+    h_patches = h // PATCH_HEIGHT
+    w_patches = w // PATCH_WIDTH
+    ic("pack_latents", b, c, t, h, w, "-> patches", h_patches, w_patches)
 
-    b, c, latent_height, latent_width = x.shape
-    h = latent_height // PATCH_HEIGHT
-    w = latent_width // PATCH_WIDTH
+    # Pack spatial patches: (B, C, T, H, W) -> (B, C, T, H/2, W/2, 2, 2)
+    x = x.unfold(3, PATCH_HEIGHT, PATCH_HEIGHT).unfold(4, PATCH_WIDTH, PATCH_WIDTH)
+    ic("after unfold", x.shape)
+    # x is now (B, C, T, H/2, W/2, 2, 2)
 
-    # [b, c, h*ph, w*ph] -> [b, c, h, w, ph, pw]
-    x = x.unfold(2, PATCH_HEIGHT, PATCH_HEIGHT).unfold(3, PATCH_WIDTH, PATCH_WIDTH)
-
-    # [b, c, h, w, ph, PW] -> [b, h, w, c, ph, PW]
-    x = x.permute(0, 2, 3, 1, 4, 5)
-
-    # [b, h, w, c, ph, PW] -> [b, h*w, c*ph*PW]
-    return x.reshape(b, h * w, c * PATCH_HEIGHT * PATCH_WIDTH)
+    # Rearrange: (B, C, T, H/2, W/2, 2, 2) -> (B, T, H/2, W/2, C, 2, 2) -> (B, T*H/2*W/2, C*4)
+    x = x.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
+    ic("after permute", x.shape)
+    x = x.reshape(b, t * h_patches * w_patches, c * PATCH_HEIGHT * PATCH_WIDTH)
+    ic("pack_latents output", x.shape)
+    
+    return x
 
 
 def unpack_latents(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
     """
-    Rearrange latents from a sequence of patches into an image-like format.
-    Equivalent to `einops.rearrange("b (h w) (c ph pw) -> b c (h ph) (w pw)")`.
+    Rearrange video latents from a sequence of patches back into (B, C, T, H, W) format.
+    Unpacks spatial patches (2x2) while preserving temporal dimension.
+    Equivalent to `einops.rearrange("b (t h w) (c ph pw) -> b c t (h ph) (w pw)")`.
 
     Args:
         x (Tensor): The packed latents.
-            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+            Shape: (bsz, (temporal * latent_height // 2 * latent_width // 2), channels * 4)
         latent_height (int): The height of the unpacked latents.
         latent_width (int): The width of the unpacked latents.
 
     Returns:
-        Tensor: The unpacked latents.
-            Shape: [bsz, ch, latent height, latent width]
+        Tensor: The unpacked video latents.
+            Shape: [bsz, channels, temporal, latent_height, latent_width]
     """
     PATCH_HEIGHT, PATCH_WIDTH = 2, 2
 
-    b, _, c_ph_pw = x.shape
-    h = latent_height // PATCH_HEIGHT
-    w = latent_width // PATCH_WIDTH
+    ic("unpack_latents input", x.shape, "target", latent_height, latent_width)
+    b, seq_len, c_ph_pw = x.shape
+    h_patches = latent_height // PATCH_HEIGHT
+    w_patches = latent_width // PATCH_WIDTH
     c = c_ph_pw // (PATCH_HEIGHT * PATCH_WIDTH)
+    t = seq_len // (h_patches * w_patches)
+    ic("unpack_latents computed", b, c, t, h_patches, w_patches, "->", latent_height, latent_width)
 
-    # [b, h*w, c*ph*pw] -> [b, h, w, c, ph, pw]
-    x = x.reshape(b, h, w, c, PATCH_HEIGHT, PATCH_WIDTH)
+    # [b, t*h*w, c*ph*pw] -> [b, t, h, w, c, ph, pw]
+    x = x.reshape(b, t, h_patches, w_patches, c, PATCH_HEIGHT, PATCH_WIDTH)
+    ic("after reshape", x.shape)
 
-    # [b, h, w, c, ph, pw] -> [b, c, h, ph, w, pw]
-    x = x.permute(0, 3, 1, 4, 2, 5)
+    # [b, t, h, w, c, ph, pw] -> [b, c, t, h, ph, w, pw]
+    x = x.permute(0, 4, 1, 2, 5, 3, 6).contiguous()
+    ic("after permute", x.shape)
 
-    # [b, c, h, ph, w, pw] -> [b, c, h*ph, w*pw]
-    return x.reshape(b, c, h * PATCH_HEIGHT, w * PATCH_WIDTH)
+    # [b, c, t, h, ph, w, pw] -> [b, c, t, h*ph, w*pw]
+    x = x.reshape(b, c, t, latent_height, latent_width)
+    ic("unpack_latents output", x.shape)
+    return x

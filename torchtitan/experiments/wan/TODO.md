@@ -21,4 +21,10 @@ What TorchTitan people had for FLUX.1:
 - [ ] update [`README.md`](./README.md)
 - [ ] update configs [`train_configs/wan_cc1xm.toml`](./train_configs/wan_cc1xm.toml) and [`train_configs/wan_1xwm.toml`](./train_configs/wan_1xwm.toml)
 - [ ] [`train.py`](./train.py:135) has the precomputed embeddings as class attributes, but it should be handled better
+- [ ] [`wan_vae.py`](./model/wan_vae.py:1495) Refactor `WanVideoVAE.encode()` to accept tensor (B, C, T, H, W) directly instead of list
+    - Currently accepts both list of (C, T, H, W) tensors or single (B, C, T, H, W) tensor
+    - Should standardize on tensor input for better performance and cleaner API
+- [ ] [`wan_vae.py`](./model/wan_vae.py:1527) Refactor `WanVideoVAE.decode()` to accept tensor (B, C, T, H, W) directly instead of list
+    - Currently accepts both list of (C, T, H, W) tensors or single (B, C, T, H, W) tensor
+    - Should standardize on tensor input for better performance and cleaner API
 
