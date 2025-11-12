@@ -1,37 +1,27 @@
 <div align="center">
 
-# FLUX model in torchtitan
-
-[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)
+# Wan model in torchtitan
 
 </div>
 
 ## Overview
-This directory contains the implementation of the [FLUX](https://github.com/black-forest-labs/flux/tree/main) model in torchtitan. In torchtitan, we showcase the pre-training process of text-to-image part of the FLUX model.
+This directory contains the implementation of Wan2.2 TI2V-5B model in torchtitan. In torchtitan, we showcase the pre-training of the model. The Wan2.2 TI2V-5B model is a transformer-based video generation model that uses flow matching for training.
 
 ## Prerequisites
 Install the required dependencies:
 ```bash
-pip install -r requirements-flux.txt
+pip install -r requirements-wan.txt
 ```
 
 ## Usage
-First, download the autoencoder model from HuggingFace with your own access token:
+Run the following command to train the model:
 ```bash
-python scripts/download_hf_assets.py --repo_id black-forest-labs/FLUX.1-dev --additional_patterns ae.safetensors --hf_token <your_access_token>
-```
-
-This step will download the autoencoder model from HuggingFace and save it to the `assets/hf/FLUX.1-dev/ae.safetensors` file.
-
-Run the following command to train the model on a single GPU:
-```bash
-./torchtitan/experiments/flux/run_train.sh
-
+./torchtitan/experiments/wan/run_train.sh
 ```
 
 If you want to train with other model args, run the following command:
 ```bash
-CONFIG_FILE="./torchtitan/models/flux/train_configs/flux_schnell_model.toml" ./torchtitan/models/flux/run_train.sh
+CONFIG_FILE="./torchtitan/experiments/wan/train_configs/wan_1xwm.toml" ./torchtitan/experiments/wan/run_train.sh
 ```
 
 
@@ -40,10 +30,11 @@ CONFIG_FILE="./torchtitan/models/flux/train_configs/flux_schnell_model.toml" ./t
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
-- CI for FLUX model. Supported periodically running integration tests on 8 GPUs, and unittests.
+- Video generation: The model supports text-to-video generation with flow matching.
+- Multi-modal encoding: Supports T5 and CLIP encoders for text conditioning.
 
 
 ## TODO
-- [ ] More parallesim support (Tensor Parallelism, Pipeline Parallelism, etc)
+- [ ] More parallelism support (Tensor Parallelism, Pipeline Parallelism, etc)
 - [ ] Implement the num_flops_per_token calculation in get_nparams_and_flops() function
 - [ ] Add `torch.compile` support
