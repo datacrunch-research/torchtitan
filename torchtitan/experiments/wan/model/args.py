@@ -35,5 +35,5 @@ class WanModelArgs(BaseModelArgs):
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
         nparams = sum(p.numel() for p in model.parameters())
-        logger.warning("Wan2.2 TI2V model haven't implement get_nparams_and_flops() function")
-        return nparams, 1
+        logger.warning("get_nparams_and_flops() is not yet implemented for the Wan2.2 TI2V model.")
+        return nparams, -1
