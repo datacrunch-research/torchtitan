@@ -90,6 +90,7 @@ class WanTrainer(Trainer):
             job_config=job_config,
         )
 
+        # TODO: this part should be handled better
         # Precompute empty string embeddings once to save memory and time
         # This allows T5 and CLIP encoders to be offloaded since we only encode ""
         logger.info("Precomputing empty string embeddings for T5 and CLIP...")
@@ -131,8 +132,8 @@ class WanTrainer(Trainer):
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
             batch=input_dict,
-            precomputed_t5_embedding=getattr(self, '_precomputed_t5_embedding', None),
-            precomputed_clip_embedding=getattr(self, '_precomputed_clip_embedding', None),
+            precomputed_t5_embedding=self._precomputed_t5_embedding,
+            precomputed_clip_embedding=self._precomputed_clip_embedding,
         )
         labels = input_dict["img_encodings"]
 

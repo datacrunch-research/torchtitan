@@ -20,4 +20,5 @@ What TorchTitan people had for FLUX.1:
     - currently is possible to run `torchrun --nproc_per_node=4 torchtitan/experiments/wan/train.py  --job.config_file torchtitan/experiments/wan/train_configs/wan_cc1xm.toml  2>&1 | tee debug.err`
 - [ ] update [`README.md`](./README.md)
 - [ ] update configs [`train_configs/wan_cc1xm.toml`](./train_configs/wan_cc1xm.toml) and [`train_configs/wan_1xwm.toml`](./train_configs/wan_1xwm.toml)
+- [ ] [`train.py`](./train.py:135) has the precomputed embeddings as class attributes, but it should be handled better
 

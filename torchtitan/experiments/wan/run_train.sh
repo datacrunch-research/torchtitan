@@ -12,7 +12,7 @@ set -ex
 # LOG_RANK=0,1 NGPU=4 ./torchtitan/experiments/wan/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/wan/train_configs/wan.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/wan/train_configs/wan_cc1xm.toml"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \

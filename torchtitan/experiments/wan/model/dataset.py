@@ -137,11 +137,13 @@ class RawVideoDataset(Dataset):
 if __name__ == "__main__":
     train_dataset = RawVideoDataset(
         data_dir="./dataset/world_model_raw_data/train_v2.0_raw",
+        downsampled=4,
     )
     print(f"train_dataset length: {len(train_dataset)}")
 
     val_dataset = RawVideoDataset(
         data_dir="./dataset/world_model_raw_data/val_v2.0_raw",
+        downsampled=4,
     )
     print(f"val_dataset length: {len(val_dataset)}")
 
