@@ -85,20 +85,14 @@ def preprocess_data(
     
     # Permute from (B, T, H, W, C) to (B, T, C, H, W)
     videos = videos.permute(0, 1, 4, 2, 3)
-    logger.info(videos.shape)
-    logger.info(videos.device)
-    logger.info(videos.dtype)
     # Normalize video frames from [0, 255] range to [-1, 1] range
     # This is required because the VAE expects input in [-1, 1] range
     max_value = 1.0
     min_value = -1.0
     videos = videos * ((max_value - min_value) / 255.0) + min_value
-    logger.info(videos.device)
-    logger.info(videos.dtype)
     # Transpose from (B, T, C, H, W) to (B, C, T, H, W) for VAE encoding
     # The VAE encode method expects a batched tensor of shape (B, C, T, H, W)
     videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
-    logger.info(f"After transpose: {videos.shape}")
     
     # Encode videos to latents using the WAN Video VAE
     # The encode method processes the entire batch at once for better performance

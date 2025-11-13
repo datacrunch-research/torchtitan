@@ -26,6 +26,28 @@ class Training:
     """Window size for sampling clips. Only used for 1x-wmds dataset."""
     robot_temporal_mode: str = "downsample"
     """How to handle robot state temporal alignment: 'downsample' or other modes. Only used for 1x-wmds dataset."""
+    num_workers: int = 0
+    """
+    Number of worker processes for data loading. 0 means data loading happens in the main process.
+    A positive value enables parallel data loading using multiple subprocesses.
+    """
+    persistent_workers: bool = False
+    """
+    If True, the data loader will not shutdown the worker processes after a dataset has been consumed once.
+    This allows the workers to persist across epochs, reducing the overhead of worker initialization.
+    Requires num_workers > 0.
+    """
+    pin_memory: bool = False
+    """
+    If True, the data loader will copy Tensors into device/CUDA pinned memory before returning them.
+    This can speed up the data transfer to GPU, especially when using num_workers > 0.
+    """
+    prefetch_factor: int = 2
+    """
+    Number of batches each worker will prefetch ahead. Default is 2.
+    Higher values can improve GPU utilization by overlapping data loading with computation,
+    but will use more memory. Only effective when num_workers > 0.
+    """
 
 
 @dataclass

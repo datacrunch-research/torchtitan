@@ -19,10 +19,12 @@ from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 
 from torch.distributed.checkpoint.stateful import Stateful
-
 from torch.utils.data import IterableDataset
+from torchdata.stateful_dataloader import StatefulDataLoader
+import pickle
+from typing import Any
 
-from torchtitan.components.dataloader import ParallelAwareDataloader
+from torchtitan.components.dataloader import BaseDataLoader
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Job, JobConfig
@@ -31,6 +33,86 @@ from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer, WanTokeniz
 from torchtitan.tools.logging import logger
 from torchtitan.experiments.wan.model.dataset import RawVideoDataset as BaseRawVideoDataset
 
+
+class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
+    """Dataloader that is aware of distributed data parallelism.
+
+    This dataloader is used to load data in a distributed data parallel fashion. It also
+    utilizes ``torchdata.stateful_dataloader.StatefulDataLoader`` to implement the necessary
+    methods such as ``__iter__``.
+
+    Args:
+        dataset (IterableDataset): The dataset to iterate over.
+        dp_rank: Data parallelism rank for this dataloader.
+        dp_world_size: The world size of the data parallelism.
+        batch_size: The batch size to use for each iteration.
+        collate_fn: Optional function to collate samples in a batch.
+        num_workers: Number of worker processes for data loading.
+        persistent_workers: Whether to keep workers alive across epochs.
+        pin_memory: Whether to pin memory for faster GPU transfer.
+        prefetch_factor: Number of batches each worker prefetches ahead.
+    """
+
+    dp_rank: int
+    dp_world_size: int
+    batch_size: int
+
+    def __init__(
+        self,
+        dataset: IterableDataset,
+        dp_rank: int,
+        dp_world_size: int,
+        batch_size: int,
+        collate_fn: Callable | None = None,
+        num_workers: int = 0,
+        persistent_workers: bool = False,
+        pin_memory: bool = False,
+        prefetch_factor: int = 2,
+    ):
+        self.dp_world_size = dp_world_size
+        self.dp_rank = dp_rank
+        self.batch_size = batch_size
+        # Pass DataLoader parameters to StatefulDataLoader which will forward them to the underlying DataLoader
+        super().__init__(
+            dataset,
+            batch_size,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+        )
+        self._rank_id = f"dp_rank_{dp_rank}"
+
+    def state_dict(self) -> dict[str, Any]:
+        """Store state only for dp rank to avoid replicating the same state across other dimensions."""
+        return {
+            # We don't have to use pickle as DCP will serialize the state_dict. However,
+            # we have to keep this for backward compatibility.
+            self._rank_id: pickle.dumps(super().state_dict()),
+            "world_size": self.dp_world_size,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Load state dict for this dataloader."""
+        # State being empty is valid.
+        if not state_dict:
+            return
+
+        if self._rank_id not in state_dict:
+            logger.warning(
+                f"DataLoader state is empty for dp rank {self.dp_rank}, "
+                f"expected key {self._rank_id}"
+            )
+            return
+
+        assert self.dp_world_size == state_dict["world_size"], (
+            "dp_degree is inconsistent before and after checkpoint, "
+            "dataloader resharding is not supported yet."
+        )
+        # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
+        # keep this for backward compatibility.
+        super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
 
 def _process_cc12m_image(
     img: PIL.Image.Image,
@@ -445,6 +527,10 @@ def build_wan_dataloader(
     dataset_name = job_config.training.dataset.lower()
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
+    num_workers = job_config.training.num_workers
+    persistent_workers = job_config.training.persistent_workers
+    pin_memory = job_config.training.pin_memory
+    prefetch_factor = job_config.training.prefetch_factor
 
     t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
 
@@ -470,6 +556,10 @@ def build_wan_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
     )
 
 
@@ -490,6 +580,11 @@ def build_wan_validation_dataloader(
     dataset_name = job_config.validation.dataset.lower()
     dataset_path = job_config.validation.dataset_path
     batch_size = job_config.validation.local_batch_size
+    # Use training dataloader settings for validation as well
+    num_workers = job_config.training.num_workers
+    persistent_workers = job_config.training.persistent_workers
+    pin_memory = job_config.training.pin_memory
+    prefetch_factor = job_config.training.prefetch_factor
 
     t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
 
@@ -515,4 +610,8 @@ def build_wan_validation_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
     )
