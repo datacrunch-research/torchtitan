@@ -8,6 +8,9 @@ from safetensors.torch import load_file as load_sft
 from typing import Optional
 from torchmetrics.functional.image import peak_signal_noise_ratio
 from torchtitan.tools.logging import logger
+from torchtitan.experiments.wan.model.dataset import RawVideoDataset
+
+
 
 import os
 # from icecream import ic
@@ -361,20 +364,41 @@ class Resample38(Resample):
             if feat_cache is not None:
                 idx = feat_idx[0]
                 if feat_cache[idx] is None:
-                    feat_cache[idx] = x.clone()
+                    # First time: apply temporal compression and cache the result
+                    # Pad temporal dimension to be divisible by stride and at least kernel_size
+                    t_curr = x.shape[2]
+                    kernel_t = self.time_conv.kernel_size[0]  # Get kernel size from time_conv
+                    # Pad to be divisible by stride (2) and at least kernel_size
+                    pad_t = max((2 - t_curr % 2) % 2, max(0, kernel_t - t_curr))
+                    if pad_t > 0:
+                        x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
+                    # Apply temporal convolution with stride 2
+                    x = self.time_conv(x)
+                    # Cache the last frame for next chunk
+                    feat_cache[idx] = x[:, :, -1:, :, :].clone()
                     feat_idx[0] += 1
                 else:
+                    # Subsequent times: concatenate with cached frame and apply compression
                     cache_x = x[:, :, -1:, :, :].clone()
                     cached_frame = feat_cache[idx][:, :, -1:, :, :]
                     x_concat = torch.cat([cached_frame, x], 2)
+                    # Ensure we have enough frames for the kernel
+                    kernel_t = self.time_conv.kernel_size[0]
+                    t_concat = x_concat.shape[2]
+                    if t_concat < kernel_t:
+                        # Pad if needed
+                        pad_t = kernel_t - t_concat
+                        x_concat = F.pad(x_concat, (0, 0, 0, 0, 0, pad_t))
                     x = self.time_conv(x_concat)
                     feat_cache[idx] = cache_x
                     feat_idx[0] += 1
             else:
                 # When feat_cache is None, still apply temporal downsampling
-                # Pad temporal dimension to be divisible by stride
+                # Pad temporal dimension to be divisible by stride and at least kernel_size
                 t_curr = x.shape[2]
-                pad_t = (2 - t_curr % 2) % 2
+                kernel_t = self.time_conv.kernel_size[0]  # Get kernel size from time_conv
+                # Pad to be divisible by stride (2) and at least kernel_size
+                pad_t = max((2 - t_curr % 2) % 2, max(0, kernel_t - t_curr))
                 if pad_t > 0:
                     x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
                 # Apply temporal convolution with stride 2
@@ -1729,7 +1753,8 @@ class VideoVAE38_(VideoVAE_):
 
 class WanVideoVAE38(WanVideoVAE):
     def __init__(self, z_dim=48, dim=160, torch_dtype=torch.bfloat16):
-        super().__init__(torch_dtype=torch_dtype)
+        # Don't call parent __init__ - we override everything
+        super(WanVideoVAE, self).__init__()
 
         mean = [
             -0.2289,
@@ -2055,15 +2080,18 @@ def load_wan_vae(
     return vae.to(dtype=dtype)
 
 def main():
+    logger.info("Starting main function")
     params_38 = WanVAEParams(vae_type="38", z_dim=48)
+    logger.info("Loading WanVideoVAE38")
     vae_38 = load_wan_vae("/root/torchtitan/Wan2.2-TI2V-5B/Wan2.2_VAE.pth", params_38, device="cuda")
+    logger.info("WanVideoVAE38 loaded")
 
-    from dataset import RawVideoDataset
     from torch.utils.data import DataLoader
     dataset = RawVideoDataset(
-        data_dir="../dataset/world_model_raw_data/train_v2.0_raw/",
+        data_dir="/root/dataset/world_model_raw_data/train_v2.0_raw/",
         downsampled=4,
-        window_size=4
+        window_size=4,
+        robot_temporal_mode="downsampled"
     )
     dataloader = DataLoader(dataset,
         shuffle=True,

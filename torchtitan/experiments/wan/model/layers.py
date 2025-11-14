@@ -9,8 +9,32 @@ import math
 from dataclasses import dataclass
 
 import torch
-from einops import rearrange
 from torch import nn, Tensor
+import torch.nn.functional as F
+from einops import rearrange
+
+from typing import Tuple, Optional
+
+try:
+    import flash_attn_interface
+
+    FLASH_ATTN_3_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_3_AVAILABLE = False
+
+try:
+    import flash_attn
+
+    FLASH_ATTN_2_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_2_AVAILABLE = False
+
+try:
+    from sageattention import sageattn
+
+    SAGE_ATTN_AVAILABLE = True
+except ModuleNotFoundError:
+    SAGE_ATTN_AVAILABLE = False
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -356,4 +380,345 @@ class LastLayer(nn.Module):
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
         x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
         x = self.linear(x)
+        return x
+
+
+
+def flash_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    num_heads: int,
+    compatibility_mode=False,
+):
+    if compatibility_mode:
+        q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
+        k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
+        v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
+    elif FLASH_ATTN_3_AVAILABLE:
+        q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
+        k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
+        v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
+        x = flash_attn_interface.flash_attn_func(q, k, v)
+        if isinstance(x, tuple):
+            x = x[0]
+        x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
+    elif FLASH_ATTN_2_AVAILABLE:
+        q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
+        k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
+        v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
+        x = flash_attn.flash_attn_func(q, k, v)
+        x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
+    elif SAGE_ATTN_AVAILABLE:
+        q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
+        k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
+        v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
+        x = sageattn(q, k, v)
+        x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
+    else:
+        q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
+        k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
+        v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
+    return x
+
+
+def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
+    return x * (1 + scale) + shift
+
+
+def sinusoidal_embedding_1d(dim, position):
+    sinusoid = torch.outer(
+        position.type(torch.float64),
+        torch.pow(
+            10000,
+            -torch.arange(dim // 2, dtype=torch.float64, device=position.device).div(
+                dim // 2
+            ),
+        ),
+    )
+    x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
+    return x.to(position.dtype)
+
+
+def precompute_freqs_cis_3d(dim: int, end: int = 1024, theta: float = 10000.0):
+    # 3d rope precompute
+    f_freqs_cis = precompute_freqs_cis(dim - 2 * (dim // 3), end, theta)
+    h_freqs_cis = precompute_freqs_cis(dim // 3, end, theta)
+    w_freqs_cis = precompute_freqs_cis(dim // 3, end, theta)
+    return f_freqs_cis, h_freqs_cis, w_freqs_cis
+
+
+def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
+    # 1d rope precompute
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].double() / dim))
+    freqs = torch.outer(torch.arange(end, device=freqs.device), freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
+
+
+def rope_apply(x, freqs, num_heads):
+    x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
+    x_out = torch.view_as_complex(
+        x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
+    )
+    x_out = torch.view_as_real(x_out * freqs).flatten(2)
+    return x_out.to(x.dtype)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        dtype = x.dtype
+        return self.norm(x.float()).to(dtype) * self.weight
+
+
+class AttentionModule(nn.Module):
+    def __init__(self, num_heads):
+        super().__init__()
+        self.num_heads = num_heads
+
+    def forward(self, q, k, v):
+        x = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads)
+        return x
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        self.norm_q = RMSNorm(dim, eps=eps)
+        self.norm_k = RMSNorm(dim, eps=eps)
+
+        self.attn = AttentionModule(self.num_heads)
+
+    def forward(self, x, freqs):
+        q = self.norm_q(self.q(x))
+        k = self.norm_k(self.k(x))
+        v = self.v(x)
+        q = rope_apply(q, freqs, self.num_heads)
+        k = rope_apply(k, freqs, self.num_heads)
+        x = self.attn(q, k, v)
+        return self.o(x)
+
+
+class CrossAttention(nn.Module):
+    def __init__(
+        self, dim: int, num_heads: int, eps: float = 1e-6
+    ):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        self.norm_q = RMSNorm(dim, eps=eps)
+        self.norm_k = RMSNorm(dim, eps=eps)
+        self.attn = AttentionModule(self.num_heads)
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        ctx = y
+        q = self.norm_q(self.q(x))
+        k = self.norm_k(self.k(ctx))
+        v = self.v(ctx)
+        x = flash_attention(q, k, v, num_heads=self.num_heads)
+        return self.o(x)
+
+
+class GateModule(nn.Module):
+    def __init__(
+        self,
+    ):
+        super().__init__()
+
+    def forward(self, x, gate, residual):
+        return x + gate * residual
+
+
+class DiTBlock(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        ffn_dim: int,
+        eps: float = 1e-6
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.ffn_dim = ffn_dim
+
+        self.self_attn = SelfAttention(hidden_dim, num_heads, eps)
+        self.cross_attn = CrossAttention(
+            hidden_dim, num_heads, eps
+        )
+        self.norm1 = nn.LayerNorm(hidden_dim, eps=eps, elementwise_affine=False)
+        self.norm2 = nn.LayerNorm(hidden_dim, eps=eps, elementwise_affine=False)
+        self.norm3 = nn.LayerNorm(hidden_dim, eps=eps)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, ffn_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(ffn_dim, hidden_dim),
+        )
+        self.modulation = nn.Parameter(torch.randn(1, 6, hidden_dim) / hidden_dim**0.5)
+        self.gate = GateModule()
+
+        # self.use_robot_conditioning = use_robot_conditioning
+        # if use_robot_conditioning:
+        #     self.robot_modulation = nn.Parameter(torch.zeros(1, 6, dim))
+
+
+    def forward(
+        self, x, context, t_mod, freqs, robot_states: Optional[torch.Tensor] = None
+    ):
+        has_seq = len(t_mod.shape) == 4
+        chunk_dim = 2 if has_seq else 1
+        # msa: multi-head self-attention  mlp: multi-layer perceptron
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
+        ).chunk(6, dim=chunk_dim)
+
+        if has_seq:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                shift_msa.squeeze(2),
+                scale_msa.squeeze(2),
+                gate_msa.squeeze(2),
+                shift_mlp.squeeze(2),
+                scale_mlp.squeeze(2),
+                gate_mlp.squeeze(2),
+            )
+
+        # if self.use_robot_conditioning and robot_states is not None:
+        #     # robot_states here are the compressed robot states from WanModel1x.forward()
+        #     # They can have shape (B, compressed_seq_len, 6, dim) after unflatten
+        #     robot_modulation = self.robot_modulation.to(
+        #         dtype=robot_states.dtype, device=robot_states.device
+        #     )
+
+        #     # Expand robot_modulation to match robot_states shape for broadcasting
+        #     # robot_modulation: (1, 6, dim) -> (1, 1, 6, dim) if has_seq else keep as (1, 6, dim)
+        #     if has_seq and len(robot_states.shape) == 4:
+        #         # robot_states: (B, T, 6, dim), robot_modulation: (1, 6, dim) -> (1, 1, 6, dim)
+        #         robot_modulation = robot_modulation.unsqueeze(1)
+
+        #     if self.adaln_mode == "additive":
+        #         robot_mod = robot_states + robot_modulation
+        #     elif self.adaln_mode == "multiplicative":
+        #         robot_mod = robot_states * robot_modulation
+        #     else:
+        #         raise ValueError(f"Unknown adaln_mode: {self.adaln_mode}")
+
+        #     # Chunk robot modulation into 6 components
+        #     (
+        #         r_shift_msa,
+        #         r_scale_msa,
+        #         r_gate_msa,
+        #         r_shift_mlp,
+        #         r_scale_mlp,
+        #         r_gate_mlp,
+        #     ) = robot_mod.chunk(6, dim=chunk_dim)
+        #     if has_seq:
+        #         (
+        #             r_shift_msa,
+        #             r_scale_msa,
+        #             r_gate_msa,
+        #             r_shift_mlp,
+        #             r_scale_mlp,
+        #             r_gate_mlp,
+        #         ) = (
+        #             r_shift_msa.squeeze(2),
+        #             r_scale_msa.squeeze(2),
+        #             r_gate_msa.squeeze(2),
+        #             r_shift_mlp.squeeze(2),
+        #             r_scale_mlp.squeeze(2),
+        #             r_gate_mlp.squeeze(2),
+        #         )
+
+        #     combined_shift_msa = shift_msa + r_shift_msa
+        #     combined_scale_msa = scale_msa + r_scale_msa
+        #     combined_gate_msa = gate_msa + r_gate_msa
+
+        #     combined_shift_mlp = shift_mlp + r_shift_mlp
+        #     combined_scale_mlp = scale_mlp + r_scale_mlp
+        #     combined_gate_mlp = gate_mlp + r_gate_mlp
+
+        #     # Apply combined modulation
+        #     input_x = modulate(self.norm1(x), combined_shift_msa, combined_scale_msa)
+        #     x = self.gate(x, combined_gate_msa, self.self_attn(input_x, freqs))
+        #     x = x + self.cross_attn(self.norm3(x), context)
+
+        #     input_x = modulate(self.norm2(x), combined_shift_mlp, combined_scale_mlp)
+        #     x = self.gate(x, combined_gate_mlp, self.ffn(input_x))
+        # else:
+        input_x = modulate(self.norm1(x), shift_msa, scale_msa)
+        x = self.gate(x, gate_msa, self.self_attn(input_x, freqs))
+        x = x + self.cross_attn(self.norm3(x), context)
+        input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
+        x = self.gate(x, gate_mlp, self.ffn(input_x))
+        return x
+
+
+class MLP(torch.nn.Module):
+    def __init__(self, in_dim, out_dim, has_pos_emb=False):
+        super().__init__()
+        self.proj = torch.nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, in_dim),
+            nn.GELU(),
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+        self.has_pos_emb = has_pos_emb
+        if has_pos_emb:
+            self.emb_pos = torch.nn.Parameter(torch.zeros((1, 514, 1280)))
+
+    def forward(self, x):
+        if self.has_pos_emb:
+            x = x + self.emb_pos.to(dtype=x.dtype, device=x.device)
+        return self.proj(x)
+
+
+class Head(nn.Module):
+    def __init__(
+        self, dim: int, out_dim: int, patch_size: Tuple[int, int, int], eps: float
+    ):
+        super().__init__()
+        self.dim = dim
+        self.patch_size = patch_size
+        self.norm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.head = nn.Linear(dim, out_dim * math.prod(patch_size))
+        self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
+
+    def forward(self, x, t_mod):
+        if len(t_mod.shape) == 3:
+            shift, scale = (
+                self.modulation.unsqueeze(0).to(dtype=t_mod.dtype, device=t_mod.device)
+                + t_mod.unsqueeze(2)
+            ).chunk(2, dim=2)
+            x = self.head(self.norm(x) * (1 + scale.squeeze(2)) + shift.squeeze(2))
+        else:
+            shift, scale = (
+                self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
+            ).chunk(2, dim=1)
+            x = self.head(self.norm(x) * (1 + scale) + shift)
         return x
