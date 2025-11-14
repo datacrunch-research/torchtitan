@@ -13,6 +13,12 @@ Install the required dependencies:
 pip install -r requirements-wan.txt
 ```
 
+## Download the Wan2.2 TI2V-5B weights
+Download the Wan2.2 TI2V-5B weights from HF:
+```bash
+python scripts/download_hf_assets.py --repo_id Wan2.2-TI2V-5B --all --hf_token <your_access_token>
+```
+
 ## Usage
 Run the following command to train the model:
 ```bash

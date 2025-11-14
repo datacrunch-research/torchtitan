@@ -36,9 +36,16 @@ from torchtitan.train import Trainer
 
 
 class WanTrainer(Trainer):
+    # Note: Wan-specific initialization (weights before FSDP) is now handled
+    # automatically by parallelize_wan() in torchtitan/experiments/wan/infra/parallelize.py
+    # No custom initialization method needed here anymore.
+
     def __init__(self, job_config: JobConfig):
+        logger.info("=" * 80)
         logger.info("Initializing WanTrainer...")
+        logger.info("=" * 80)
         super().__init__(job_config)
+        logger.info("Base Trainer initialization completed, continuing with Wan-specific setup...")
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
@@ -51,7 +58,7 @@ class WanTrainer(Trainer):
             distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
         )
 
-        # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
+        # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder).
         # We cast the encoders and it's input/output to this dtype.  If FSDP with mixed precision training is not used,
         # the dtype for encoders is torch.float32 (default dtype for Wan Model).
         # Otherwise, we use the same dtype as mixed precision training process.
@@ -63,11 +70,14 @@ class WanTrainer(Trainer):
         logger.info(f"Encoder dtype set to: {self._dtype}")
 
         # load components
-        logger.info("Loading Wan model components...")
+        logger.info("=" * 80)
+        logger.info("STEP 5: Loading Wan model components (VAE, encoders)")
+        logger.info("=" * 80)
         model_args = self.train_spec.model_args[job_config.model.flavor]
-        logger.info(f"model_args: {model_args}")
+        logger.info(f"  - Model args: {model_args}")
         
-        logger.info(f"Loading Wan VAE from: {job_config.encoder.wan_vae_path}")
+        logger.info(f"  - Loading Wan VAE from: {job_config.encoder.wan_vae_path}")
+        logger.info(f"    Device: {self.device}, Dtype: {self._dtype}")
         self.wan_video_vae = load_wan_vae(
             job_config.encoder.wan_vae_path,
             model_args.wan_video_vae_params,
@@ -75,53 +85,70 @@ class WanTrainer(Trainer):
             dtype=self._dtype,
             random_init=job_config.training.test_mode,
         )
-        logger.info("Wan VAE loaded successfully")
+        logger.info("  ✓ Wan VAE loaded successfully")
         # TODO: add here the loading of the WanVideoVAE38
         
-        logger.info(f"Loading CLIP encoder: {job_config.encoder.clip_encoder}")
-        self.clip_encoder = WanEmbedder(
-            version=job_config.encoder.clip_encoder,
-            random_init=job_config.training.test_mode,
-        ).to(device=self.device, dtype=self._dtype)
-        logger.info("CLIP encoder loaded successfully")
-        
-        logger.info(f"Loading T5 encoder: {job_config.encoder.t5_encoder}")
+        logger.info(f"  - Loading T5 encoder: {job_config.encoder.t5_encoder}")
+        logger.info(f"    Device: {self.device}, Dtype: {self._dtype}")
         self.t5_encoder = WanEmbedder(
             version=job_config.encoder.t5_encoder,
             random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
-        logger.info("T5 encoder loaded successfully")
+        logger.info("  ✓ T5 encoder loaded successfully")
 
-        # Apply FSDP to the T5 model / CLIP model / VAE
-        logger.info("Applying FSDP parallelization to encoders (T5, CLIP, VAE)...")
-        self.t5_encoder, self.clip_encoder, self.wan_video_vae = parallelize_encoders(
+        # Apply FSDP to the T5 model / VAE
+        logger.info("=" * 80)
+        logger.info("STEP 6: Applying FSDP parallelization to encoders (T5, VAE)")
+        logger.info("=" * 80)
+        self.t5_encoder, self.wan_video_vae = parallelize_encoders(
             t5_model=self.t5_encoder,
-            clip_model=self.clip_encoder,
             wan_video_vae=self.wan_video_vae,
             parallel_dims=self.parallel_dims,
             job_config=job_config,
         )
-        logger.info("FSDP parallelization applied to encoders")
+        logger.info("  ✓ FSDP parallelization applied to encoders")
 
         # TODO: this part should be handled better
         # Precompute empty string embeddings once to save memory and time
-        # This allows T5 and CLIP encoders to be offloaded since we only encode ""
-        logger.info("Precomputing empty string embeddings for T5 and CLIP...")
+        # This allows T5 encoder to be offloaded since we only encode ""
+        logger.info("=" * 80)
+        logger.info("STEP 7: Precomputing empty string embeddings for T5")
+        logger.info("=" * 80)
+        logger.info("  - This allows encoder to be offloaded since we only encode empty strings (\"\")")
+        logger.info("  - T5 uses last_hidden_state for per-token embeddings")
+        logger.info("  - Precomputed embeddings will be reused during training to avoid encoder forward passes")
         with torch.no_grad():
             # Get empty string tokens
-            t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
+            logger.info("  - Building tokenizer...")
+            t5_tokenizer = build_wan_tokenizer(job_config)
+            logger.info("  - Encoding empty string...")
             empty_t5_tokens_tensor = t5_tokenizer.encode("").to(device=self.device)
-            empty_clip_tokens_tensor = clip_tokenizer.encode("").to(device=self.device)
+            logger.info(f"  - T5 tokens shape: {empty_t5_tokens_tensor.shape}")
             
-            # Compute embeddings using the encoders (after FSDP wrapping)
+            logger.info("  - Computing embeddings using encoder...")
+            # Compute embeddings using the encoder (after FSDP wrapping)
             self._precomputed_t5_embedding = self.t5_encoder(empty_t5_tokens_tensor).to(dtype=self._dtype)
-            self._precomputed_clip_embedding = self.clip_encoder(empty_clip_tokens_tensor).to(dtype=self._dtype)
+            
+            logger.info(f"  - T5 embedding shape (before squeeze): {self._precomputed_t5_embedding.shape}")
             
             # Remove batch dimension for single sample
+            logger.info("  - Removing batch dimension...")
             self._precomputed_t5_embedding = self._precomputed_t5_embedding.squeeze(0)  # [seq_len, hidden_dim]
-            self._precomputed_clip_embedding = self._precomputed_clip_embedding.squeeze(0)  # [seq_len, hidden_dim]
             
-        logger.info("Empty string embeddings precomputed successfully")
+            logger.info(f"  - T5 embedding shape (after squeeze): {self._precomputed_t5_embedding.shape}")
+            
+        logger.info("  ✓ Empty string embeddings precomputed successfully")
+        
+        # Delete T5 encoder after precomputation to free memory
+        # It's no longer needed since we use precomputed embeddings
+        if not job_config.validation.enable:
+            logger.info("  - Deleting T5 encoder (no longer needed, using precomputed embeddings)...")
+            del self.t5_encoder
+            # Also delete tokenizer as it's no longer needed
+            del t5_tokenizer
+            logger.info("  ✓ Encoder and tokenizer deleted to free memory")
+        else:
+            logger.info("  - Keeping encoder (validation is enabled and may need it)")
 
         if job_config.validation.enable:
             logger.info("Initializing Wan validator...")
@@ -131,12 +158,13 @@ class WanTrainer(Trainer):
                 # autoencoder=self.autoencoder,
                 wan_video_vae=self.wan_video_vae,
                 t5_encoder=self.t5_encoder,
-                clip_encoder=self.clip_encoder,
             )
             logger.info("Wan validator initialized")
             # TODO: also here add the validation code for wan
         
+        logger.info("=" * 80)
         logger.info("WanTrainer initialization completed")
+        logger.info("=" * 80)
 
     
     def batch_generator(
@@ -177,16 +205,15 @@ class WanTrainer(Trainer):
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
-        # Preprocess data: generate t5 and clip embeddings, encode video with VAE
+        # Preprocess data: generate t5 embeddings, encode video with VAE
+        # Encoder may be None if it was deleted after precomputation
         input_dict = preprocess_data(
             device=self.device,
             dtype=self._dtype,
             wan_video_vae=self.wan_video_vae,
-            clip_encoder=self.clip_encoder,
-            t5_encoder=self.t5_encoder,
+            t5_encoder=getattr(self, 't5_encoder', None),
             batch=input_dict,
             precomputed_t5_embedding=self._precomputed_t5_embedding,
-            precomputed_clip_embedding=self._precomputed_clip_embedding,
         )
 
         # Keep these variables local to shorten the code as these are
@@ -195,7 +222,6 @@ class WanTrainer(Trainer):
         model = self.model_parts[0]
         # TODO: same for Wan's DiT?
 
-        clip_encodings = input_dict["clip_encodings"]
         t5_encodings = input_dict["t5_encodings"]
         labels = input_dict["latents"]
 
