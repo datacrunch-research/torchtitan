@@ -80,7 +80,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             importlib.import_module(job_config.experimental.custom_import)
 
         device_module, device_type = utils.device_module, utils.device_type
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        local_rank = int(os.environ['LOCAL_RANK'])
+        self.device = torch.device(f"{device_type}:{local_rank}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 

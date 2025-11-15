@@ -102,8 +102,9 @@ class WanModel(torch.nn.Module):
         Initialize model weights. If pretrained_weights_path is provided, loads weights from
         HuggingFace safetensors format. Otherwise, uses default initialization.
         
-        IMPORTANT: This method should be called BEFORE FSDP wrapping. Loading weights after
-        FSDP wrapping (when parameters are DTensors) is not supported and will fail with an error.
+        This method now supports loading weights into FSDP-wrapped models (DTensors) using
+        PyTorch's distributed checkpoint APIs. Weights can be loaded either before or after
+        FSDP wrapping.
         
         Args:
             buffer_device: Device for buffer initialization (unused for weight loading)
@@ -177,39 +178,15 @@ class WanModel(torch.nn.Module):
             logger.info(f"Successfully loaded {len(state_dict)} total weights from all shard files")
             
             # Filter state dict to only include keys that exist in the model
-            # IMPORTANT: Weights should be loaded BEFORE FSDP wrapping.
-            # If the model is already wrapped with FSDP (DTensors), loading will fail.
+            # We now support loading into FSDP-wrapped models (DTensors) using set_model_state_dict
             logger.info("Filtering checkpoint weights to match model parameters...")
-            model_state_dict = self.state_dict()
+            from torch.distributed.checkpoint.state_dict import get_model_state_dict, set_model_state_dict, StateDictOptions
+            
+            # Get model state dict - this works with both regular models and FSDP-wrapped models
+            model_state_dict = get_model_state_dict(self)
             logger.info(f"Model has {len(model_state_dict)} parameter tensors")
             
-            # Check if model is wrapped with FSDP (parameters are DTensors)
-            # DTensors have a '_spec' attribute
-            is_fsdp_wrapped = False
-            if model_state_dict:
-                first_param = next(iter(model_state_dict.values()))
-                # Check if parameter is a DTensor by looking for _spec attribute
-                # DTensors are not regular torch.Tensors
-                try:
-                    from torch.distributed.tensor import DTensor
-                    if isinstance(first_param, DTensor):
-                        is_fsdp_wrapped = True
-                except ImportError:
-                    # DTensor not available, check by attribute
-                    if hasattr(first_param, '_spec'):
-                        is_fsdp_wrapped = True
-            
-            if is_fsdp_wrapped:
-                # Model is already wrapped with FSDP - weights should have been loaded before sharding
-                logger.error(
-                    "Model is wrapped with FSDP (DTensors detected). "
-                    "Weights must be loaded BEFORE FSDP wrapping. "
-                    "Please modify the Trainer to call init_weights() before parallelize_fn(). "
-                    "Skipping weight loading."
-                )
-                return
-            
-            logger.info("Model is not FSDP-wrapped, proceeding with standard weight loading")
+            # Filter checkpoint weights to match model parameters
             filtered_state_dict = {}
             missing_keys = []
             unexpected_keys = []
@@ -217,12 +194,33 @@ class WanModel(torch.nn.Module):
             for key, value in state_dict.items():
                 if key in model_state_dict:
                     # Check if shapes match
-                    if model_state_dict[key].shape == value.shape:
+                    model_param = model_state_dict[key]
+                    # For DTensors, get the full shape (not the local shard shape)
+                    # set_model_state_dict() will handle sharding automatically
+                    try:
+                        from torch.distributed.tensor import DTensor
+                        if isinstance(model_param, DTensor):
+                            # DTensor case: use full_shape() to get the full tensor shape
+                            model_shape = model_param.full_shape()
+                        else:
+                            # Regular tensor case
+                            model_shape = model_param.shape
+                    except (ImportError, AttributeError):
+                        # Fallback: try to get shape directly
+                        if hasattr(model_param, 'shape'):
+                            model_shape = model_param.shape
+                        else:
+                            # If we can't determine shape, skip this key
+                            logger.warning(f"Cannot determine shape for key '{key}', skipping.")
+                            missing_keys.append(key)
+                            continue
+                    
+                    if model_shape == value.shape:
                         filtered_state_dict[key] = value
                     else:
                         logger.warning(
                             f"Shape mismatch for key '{key}': "
-                            f"model expects {model_state_dict[key].shape}, "
+                            f"model expects {model_shape}, "
                             f"checkpoint has {value.shape}. Skipping."
                         )
                         missing_keys.append(key)
@@ -239,13 +237,18 @@ class WanModel(torch.nn.Module):
             if unexpected_keys:
                 logger.info(f"Unexpected keys (not in model): {len(unexpected_keys)}")
             
-            # Load the filtered state dict into the model
+            # Load the filtered state dict into the model using set_model_state_dict
+            # This works with both regular models and FSDP-wrapped models (DTensors)
             if filtered_state_dict:
                 logger.info(f"Loading {len(filtered_state_dict)} weights into model...")
-                missing, unexpected = self.load_state_dict(filtered_state_dict, strict=False)
+                set_model_state_dict(
+                    self,
+                    model_state_dict=filtered_state_dict,
+                    options=StateDictOptions(strict=False)
+                )
                 logger.info(
                     f"✓ Successfully loaded {len(filtered_state_dict)} pretrained weights from {pretrained_weights_path}. "
-                    f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}"
+                    f"Missing keys: {len(missing_keys)}, Unexpected keys: {len(unexpected_keys)}"
                 )
             else:
                 logger.warning("No matching weights found. Model will use default initialization.")

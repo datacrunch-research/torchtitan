@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import sys
+
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -15,91 +17,58 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
+
+# # Import LoRA functions (only when needed)
+# try:
+#     from torchtitan.experiments.wan.model.lora import apply_lora_to_linear, freeze_base_weights
+#     LORA_AVAILABLE = True
+# except ImportError:
+#     LORA_AVAILABLE = False
 
 
 def parallelize_wan(
     model: nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
-    *args,  # Accept extra args for compatibility (init_device, buffer_device, etc.)
-    **kwargs,  # Accept extra kwargs for compatibility
+    *args,  # Accept extra args for compatibility (unused now)
+    **kwargs,  # Accept extra kwargs for compatibility (unused now)
 ):
     """
-    Apply parallelism to Wan model. For Wan models, weights must be loaded BEFORE FSDP wrapping.
-    
-    This function automatically handles:
-    - Moving model from meta device to target device
-    - Loading pretrained weights (if available) before FSDP wrapping
-    - Applying FSDP/parallelism
+    Apply parallelism to Wan model. This function only applies parallelism (FSDP, activation
+    checkpointing, compile, etc.). Weight initialization is handled separately in train.py
+    after parallelization, which allows weights to be loaded into FSDP-wrapped models using
+    PyTorch's distributed checkpoint APIs.
     
     Args:
         model: The model to parallelize (on meta device)
         parallel_dims: Parallelism dimensions
         job_config: Job configuration
-        *args: Extra positional arguments (for compatibility, accepts init_device, buffer_device)
-        **kwargs: Extra keyword arguments (for compatibility)
+        *args: Extra positional arguments (for compatibility, unused)
+        **kwargs: Extra keyword arguments (for compatibility, unused)
     
     Returns:
-        The parallelized model
+        The parallelized model (still on meta device, weights not initialized)
     """
-    # Determine init_device and buffer_device from config (same logic as base Trainer)
-    device_type = utils.device_type
-    if job_config.checkpoint.create_seed_checkpoint:
-        init_device = "cpu"
-        buffer_device = None
-    elif job_config.training.enable_cpu_offload:
-        init_device = "cpu"
-        buffer_device = device_type
-    else:
-        init_device = device_type
-        buffer_device = None
     
-    # Get pretrained weights path from config or kwargs
-    pretrained_weights_path = kwargs.get('pretrained_weights_path', None)
-    if pretrained_weights_path is None:
-        pretrained_weights_path = getattr(job_config.encoder, 'pretrained_weights_path', None)
-    
-    # Override with args if provided (for backward compatibility)
-    if len(args) >= 1:
-        init_device = args[0]
-    if len(args) >= 2:
-        buffer_device = args[1]
-    if len(args) >= 3:
-        pretrained_weights_path = args[2]
-    
-    # Wan-specific: Load weights BEFORE applying FSDP wrapping
-    # This avoids DTensor complications when loading weights
-    # Check if model is on meta device (needs initialization)
-    if hasattr(model, 'parameters') and next(model.parameters(), None) is not None:
-        first_param = next(model.parameters())
-        is_meta_device = first_param.device.type == "meta"
-    else:
-        # If no parameters, check buffers or assume meta
-        is_meta_device = True
-    
-    if is_meta_device:
-        logger.info("  [parallelize_wan] Moving model to device and loading weights (BEFORE FSDP)...")
-        model.to_empty(device=init_device)
-        
-        # Load pretrained weights if model supports it
-        if hasattr(model, 'init_weights'):
-            if pretrained_weights_path is not None:
-                logger.info(f"  [parallelize_wan] Loading pretrained weights from: {pretrained_weights_path}")
-                with torch.no_grad():
-                    model.init_weights(buffer_device=buffer_device, pretrained_weights_path=pretrained_weights_path)
-                logger.info("  [parallelize_wan] ✓ Pretrained weights loaded successfully")
-            else:
-                # Still call init_weights for default initialization (if needed)
-                # Some models might need this even without pretrained weights
-                logger.debug("  [parallelize_wan] No pretrained weights path, using default initialization")
-                with torch.no_grad():
-                    model.init_weights(buffer_device=buffer_device)
-    
+    # Apply activation checkpointing if enabled
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
+
+    # Apply torch.compile if enabled
+    # Note: Compile should be applied AFTER activation checkpointing and BEFORE FSDP
+    # for best performance and compatibility
+    if job_config.compile.enable and "model" in job_config.compile.components:
+        logger.info("  [parallelize_wan] Applying torch.compile to model...")
+        logger.info(f"    - Backend: {job_config.compile.backend}")
+        logger.info(f"    - Components: {job_config.compile.components}")
+        sys.stdout.flush()
+        apply_compile(model, job_config.compile)
+        logger.info("  [parallelize_wan] ✓ Model compilation completed")
+        sys.stdout.flush()
 
     if parallel_dims.fsdp_enabled:
         if parallel_dims.dp_replicate_enabled:
@@ -107,6 +76,8 @@ def parallelize_wan(
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
 
+        logger.info("  [parallelize_wan] Applying FSDP wrapping (this may take a minute)...")
+        sys.stdout.flush()
         apply_fsdp(
             model,
             parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
@@ -119,6 +90,7 @@ def parallelize_wan(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
+        sys.stdout.flush()
 
         if parallel_dims.cp_enabled:
             # The attention in Flux does not use causal mask.
@@ -183,6 +155,36 @@ def apply_ac(model: nn.Module, ac_config):
         model.blocks.register_module(layer_id, block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
+
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
+    """
+    Apply torch.compile to the Wan model.
+    
+    For Wan models, we compile each transformer block individually for efficiency,
+    similar to how other models handle compilation. This allows for better optimization
+    of the repeated transformer structure.
+    
+    Args:
+        model: The WanModel to compile
+        compile_config: Compile configuration from job_config
+    """
+    # Compile each transformer block individually
+    # This is more efficient than compiling the whole model due to repeated structure
+    compiled_blocks = 0
+    for layer_id, block in model.blocks.named_children():
+        compiled_block = torch.compile(
+            block,
+            backend=compile_config.backend,
+            fullgraph=True,  # Require full graph for better optimization
+        )
+        model.blocks.register_module(layer_id, compiled_block)
+        compiled_blocks += 1
+    
+    logger.info(
+        f"Compiled {compiled_blocks} transformer blocks with torch.compile "
+        f"(backend: {compile_config.backend})"
+    )
 
 
 def parallelize_encoders(

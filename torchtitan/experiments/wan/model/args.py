@@ -63,15 +63,59 @@ class WanModelArgs(BaseModelArgs):
         #     self.hidden_dim = job_config.model.hidden_dim
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        # TODO(jianiw): Add the number of flops for the autoencoder
+        # TODO: double check the FLOPS calculations
+        """
+        Calculate the number of parameters and FLOPS for the Wan2.2 TI2V model.
+        
+        This implementation uses the standard transformer FLOPS formula:
+        - 6 * (nparams - nparams_embedding) for forward+backward passes through weights
+        - 6 * num_layers * num_heads * head_dims * seq_len for attention operations
+        
+        Note: The autoencoder (VAE) FLOPS are not included in this calculation,
+        as the VAE is typically used only during inference/preprocessing.
+        The main transformer model FLOPS are calculated here for training metrics.
+        
+        Args:
+            model: The WanModel1x model instance
+            seq_len: Sequence length from training configuration
+            
+        Returns:
+            Tuple of (nparams, num_flops_per_token):
+                nparams: Total number of model parameters
+                num_flops_per_token: Estimated FLOPS per token for MFU calculation
+        """
+        # Calculate head dimension: hidden_dim divided by number of attention heads
+        # head_dims = 2 * head_dim represents qk dimensions (query + key) for attention
+        head_dim = self.hidden_dim // self.num_heads
+        head_dims = 2 * head_dim
+        
+        # Count total model parameters
         nparams = sum(p.numel() for p in model.parameters())
-        logger.info(f"nparams: {nparams}")
-        logger.warning(
-            "get_nparams_and_flops() is not yet implemented for the Wan2.2 TI2V model. "
-            "Returning placeholder value of 1 for num_flops_per_token. "
-            "MFU and TFLOPs metrics will be incorrect and should be ignored."
+        
+        # Count embedding parameters (if any) - Wan model doesn't use standard nn.Embedding
+        # but has patch embeddings (Conv3d) and text embeddings (Linear)
+        # These are included in the parameter count but not subtracted for FLOPS calculation
+        # as they're part of the model's computational graph
+        nparams_embedding = 0
+        
+        # Calculate FLOPS using the standard transformer formula:
+        # Factor of 6 accounts for:
+        #   - 2 FLOPS per parameter in forward pass (multiplication + addition)
+        #   - 4 FLOPS per parameter in backward pass (gradient computation)
+        # First term: FLOPS for all non-embedding parameters (weights in transformer layers)
+        # Second term: FLOPS for attention operations (qk computation and value aggregation)
+        #   - 6 * num_layers * num_heads * head_dims * seq_len
+        #   - This accounts for attention score computation and value aggregation
+        num_flops_per_token = (
+            6 * (nparams - nparams_embedding)
+            + 6 * self.num_layers * self.num_heads * head_dims * seq_len
         )
-        # Return 1 as placeholder to satisfy assertion in metrics_processor.log()
-        # This allows training to proceed, but MFU/TFLOPs calculations will be wrong
-        # The actual loss computation in wan_video_1x.py doesn't use this value
-        return nparams, 1
+        
+        logger.info(
+            f"Wan model parameters: {nparams:,}, "
+            f"FLOPS per token: {num_flops_per_token:,.0f}, "
+            f"head_dim: {head_dim}, num_layers: {self.num_layers}, "
+            f"num_heads: {self.num_heads}, seq_len: {seq_len}"
+        )
+        
+        return nparams, int(num_flops_per_token)

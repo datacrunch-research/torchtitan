@@ -11,11 +11,11 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 5
+log_freq = 1
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
-enable_wandb = false
+enable_wandb = true
 
 [model]
 name = "wan"
@@ -23,7 +23,7 @@ flavor = "wan-video"
 
 [optimizer]
 name = "AdamW"
-lr = 4e-4
+lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
@@ -31,18 +31,18 @@ warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
 [training]
-local_batch_size = 2
-max_norm = 2.0  # grad norm clipping
+local_batch_size = 192
+max_norm = 1.0  # grad norm clipping
 steps = 30_000
 dataset = "1xwm"
 dataset_path = "./dataset/world_model_raw_data/train_v2.0_raw"
 downsampled = 4  # Downsampling factor: 1, 2, or 4
 clip_length = 77  # Number of frames per clip
-window_size = 4  # Window size for sampling clips
+window_size = 8  # Window size for sampling clips
 robot_temporal_mode = "downsample"  # How to handle robot state temporal alignment
 classifier_free_guidance_prob = 0.447
 img_size = 256
-num_workers = 8  # Number of worker processes for data loading (0 = main process only)
+num_workers = 10 # Number of worker processes for data loading (0 = main process only)
 persistent_workers = true  # Keep workers alive across epochs (requires num_workers > 0)
 pin_memory = true  # Pin memory for faster GPU transfer (recommended when using GPU)
 prefetch_factor = 1  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
@@ -61,10 +61,19 @@ data_parallel_shard_degree = -1
 [activation_checkpoint]
 mode = "full"
 
+[compile]
+# NOTE: Using "aot_eager" backend instead of "inductor" due to Triton compatibility issues with GB300
+# GB300 has compute capability 10.3 (SM 103), but Triton generates sm_103a which ptxas doesn't recognize
+# The "aot_eager" backend avoids Triton and should work on GB300, though performance may be lower than inductor
+# Once Triton/PyTorch adds proper GB300 (sm_103) support, switch back to backend = "inductor" for best performance
+enable = true
+components = ["model", "loss"]  # Compile both model and loss function
+backend = "aot_eager"  # Use aot_eager backend (no Triton) to avoid sm_103a compilation errors
+
 [checkpoint]
-enable = false
+enable = true
 folder = "checkpoint"
-interval = 1_000
+interval = 10
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]

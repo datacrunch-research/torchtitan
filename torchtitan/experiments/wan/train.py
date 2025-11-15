@@ -36,9 +36,9 @@ from torchtitan.train import Trainer
 
 
 class WanTrainer(Trainer):
-    # Note: Wan-specific initialization (weights before FSDP) is now handled
-    # automatically by parallelize_wan() in torchtitan/experiments/wan/infra/parallelize.py
-    # No custom initialization method needed here anymore.
+    # Note: Wan model now uses the standard initialization flow in train.py.
+    # Weight loading into FSDP-wrapped models is supported via set_model_state_dict(),
+    # so weights are loaded after parallelization like all other models.
 
     def __init__(self, job_config: JobConfig):
         logger.info("=" * 80)
@@ -228,14 +228,24 @@ class WanTrainer(Trainer):
 
         bsz = labels.shape[0]
 
+        # Get number of conditioning frames to keep clean (no noise)
+        # The model expects first num_latent_cond frames to be clean for conditioning
+        num_latent_cond = model.num_latent_cond if hasattr(model, 'num_latent_cond') else 2
+
         # Generate noise and timesteps for diffusion training
         with torch.no_grad(), torch.device(self.device):
             noise = torch.randn_like(labels, dtype=torch.bfloat16)
             timesteps = torch.rand((bsz,), dtype=torch.bfloat16)
             sigmas = timesteps.view(-1, 1, 1, 1, 1)
             # Mix clean latents with noise based on timesteps
+            # Shape: (B, C, T, H, W) - we mask along temporal dimension (dim=2)
             latents = (1 - sigmas) * labels + sigmas * noise
-        # TODO: keep in mind the masking of the latents
+            
+            # Masking: Keep first num_latent_cond frames clean (no noise) for conditioning
+            # These frames serve as conditioning context for the model
+            if num_latent_cond > 0 and labels.shape[2] > num_latent_cond:
+                # Keep first num_latent_cond frames as clean latents (no noise)
+                latents[:, :, :num_latent_cond, :, :] = labels[:, :, :num_latent_cond, :, :]
         # logger.info(f"latents shape: {latents.shape}")
         # logger.info(f"latents device: {latents.device}")
         # assert latents.dtype == torch.bfloat16, "Latents must be bfloat16"
@@ -251,7 +261,15 @@ class WanTrainer(Trainer):
 
             # Patchify: Convert latent into a sequence of patches
             latents_p = pack_latents(latents)
-            target = pack_latents(noise - labels)
+            
+            # Compute target: noise - labels for frames that need prediction
+            # For conditioning frames (first num_latent_cond), target should be zero
+            # since we're not predicting noise for clean conditioning frames
+            target_noise_diff = noise - labels
+            if num_latent_cond > 0 and labels.shape[2] > num_latent_cond:
+                # Set target to zero for conditioning frames (no noise prediction needed)
+                target_noise_diff[:, :, :num_latent_cond, :, :] = 0.0
+            target = pack_latents(target_noise_diff)
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
