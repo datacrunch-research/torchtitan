@@ -15,6 +15,8 @@ from einops import rearrange
 
 from typing import Tuple, Optional
 
+from torchtitan.tools.logging import logger
+
 try:
     import flash_attn_interface
 
@@ -456,17 +458,67 @@ def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
     # 1d rope precompute
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].double() / dim))
     freqs = torch.outer(torch.arange(end, device=freqs.device), freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    
+    # Instead of using torch.polar (complex), compute cos/sin directly
+    # This avoids complex number operations that TorchInductor doesn't support well
+    # freqs_cis = torch.polar(ones, freqs) is equivalent to:
+    #   real = cos(freqs), imag = sin(freqs)
+    # We store as (..., 2) tensor where [..., 0] = cos, [..., 1] = sin
+    freqs_cis = torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1)
     return freqs_cis
 
 
+
 def rope_apply(x, freqs, num_heads):
+    # Convert complex RoPE to real-valued implementation for better torch.compile support
+    # Original: x_complex * freqs_complex = (x_real + i*x_imag) * (cos + i*sin)
+    #           = (x_real*cos - x_imag*sin) + i*(x_real*sin + x_imag*cos)
+    # We implement this using only real operations to avoid TorchInductor warnings
+    
+    # Save original dtype before any conversions
+    original_dtype = x.dtype
+    
     x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
-    x_out = torch.view_as_complex(
-        x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
-    )
-    x_out = torch.view_as_real(x_out * freqs).flatten(2)
-    return x_out.to(x.dtype)
+    
+    # Reshape x to extract real/imaginary pairs for RoPE computation
+    # x: (b, s, n, head_dim) -> (b, s, n, head_dim//2, 2)
+    # Each pair represents (real, imag) components of a complex number
+    b, s, n, head_dim = x.shape
+    head_dim_pairs = head_dim // 2
+    x_reshaped = x.to(torch.float32).reshape(b, s, n, head_dim_pairs, 2)
+    x_real = x_reshaped[..., 0]  # (b, s, n, head_dim//2)
+    x_imag = x_reshaped[..., 1]  # (b, s, n, head_dim//2)
+    
+    # Extract cos/sin frequencies from freqs
+    # freqs has shape (freqs_seq_len, 1, head_dim) where head_dim contains (cos, sin) pairs
+    # Reshape to (freqs_seq_len, 1, head_dim//2, 2) to separate cos/sin pairs
+    freqs_seq_len, _, freqs_head_dim = freqs.shape
+    assert freqs_head_dim == head_dim, f"freqs head_dim {freqs_head_dim} != x head_dim {head_dim}"
+    freqs_reshaped = freqs.view(freqs_seq_len, 1, head_dim_pairs, 2)
+    cos_freqs = freqs_reshaped[..., 0]  # (freqs_seq_len, 1, head_dim//2)
+    sin_freqs = freqs_reshaped[..., 1]  # (freqs_seq_len, 1, head_dim//2)
+    
+    # Slice to match actual sequence length and reshape for broadcasting
+    # cos_freqs/sin_freqs: (freqs_seq_len, 1, head_dim//2) -> (1, s, 1, head_dim//2)
+    cos_freqs = cos_freqs[:s].view(1, s, 1, head_dim_pairs)
+    sin_freqs = sin_freqs[:s].view(1, s, 1, head_dim_pairs)
+    
+    # Apply RoPE: (x_real + i*x_imag) * (cos + i*sin)
+    # = (x_real*cos - x_imag*sin) + i*(x_real*sin + x_imag*cos)
+    out_real = x_real * cos_freqs - x_imag * sin_freqs
+    out_imag = x_real * sin_freqs + x_imag * cos_freqs
+    
+    # Stack back to (..., pairs, 2) format
+    x_out = torch.stack([out_real, out_imag], dim=-1)
+    x_out = x_out.flatten(3)  # Flatten the pairs dimension: (b, s, n, head_dim)
+    
+    # Reshape back to (b, s, n*head_dim) to match expected input format for flash_attention
+    # This is the original shape format expected by downstream functions
+    x_out = x_out.reshape(x_out.shape[0], x_out.shape[1], -1)  # (b, s, n*head_dim)
+    
+    # Convert back to original dtype
+    x_out = x_out.to(original_dtype)
+    return x_out
 
 
 class RMSNorm(nn.Module):
