@@ -6,6 +6,8 @@
 
 import torch
 from torch import nn, Tensor
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Replicate, Shard
 import math
 import hashlib
 import json
@@ -15,11 +17,61 @@ from typing import Tuple, Optional
 from safetensors.torch import load_file as load_safetensors
 from torchtitan.tools.logging import logger
 
+
+
 def hash_state_dict_keys(state_dict):
     """Hash the keys of a state dict to identify model variants."""
     keys = sorted(state_dict.keys())
     key_string = "|".join(keys)
     return hashlib.md5(key_string.encode()).hexdigest()
+
+
+def _load_dtensor_state_dict(model_state_dict, filtered_state_dict):
+    """Load checkpoint values into DTensor model parameters, handling FSDP sharding."""    
+    for key, checkpoint_value in filtered_state_dict.items():
+        if key not in model_state_dict:
+            continue
+            
+        model_param = model_state_dict[key]
+        
+        # Regular tensors: direct assignment
+        if not isinstance(model_param, DTensor):
+            model_param.copy_(checkpoint_value.to(device=model_param.device, dtype=model_param.dtype))
+            continue
+        
+        # DTensors: extract shard and assign to local shard
+        model_local = model_param.to_local()
+        checkpoint_value = checkpoint_value.to(device=model_local.device, dtype=model_local.dtype)
+        
+        # Extract shard if parameter is sharded (FSDP)
+        if len(model_param.placements) > 0 and isinstance(model_param.placements[0], Shard):
+            shard_dim = model_param.placements[0].dim
+            rank = model_param.device_mesh.get_local_rank()
+            world_size = model_param.device_mesh.size()
+            
+            # Calculate shard indices
+            full_size = checkpoint_value.shape[shard_dim]
+            shard_size = full_size // world_size
+            remainder = full_size % world_size
+            start_idx = rank * shard_size + min(rank, remainder)
+            end_idx = start_idx + shard_size + (1 if rank < remainder else 0)
+            
+            # Extract shard
+            if shard_dim == 0:
+                checkpoint_shard = checkpoint_value[start_idx:end_idx]
+            else:
+                indices = [slice(None)] * len(checkpoint_value.shape)
+                indices[shard_dim] = slice(start_idx, end_idx)
+                checkpoint_shard = checkpoint_value[tuple(indices)]
+        else:
+            checkpoint_shard = checkpoint_value  # Replicate: use full tensor
+        
+        # Assign if shapes match
+        if checkpoint_shard.shape == model_local.shape:
+            model_local.copy_(checkpoint_shard)
+        else:
+            logger.warning(f"Shape mismatch for {key}: checkpoint {checkpoint_shard.shape} != model {model_local.shape}")
+
 
 from torchtitan.experiments.wan.model.layers import (
     DoubleStreamBlock,
@@ -237,15 +289,27 @@ class WanModel(torch.nn.Module):
             if unexpected_keys:
                 logger.info(f"Unexpected keys (not in model): {len(unexpected_keys)}")
             
-            # Load the filtered state dict into the model using set_model_state_dict
-            # This works with both regular models and FSDP-wrapped models (DTensors)
+            # Load the filtered state dict into the model
+            # For FSDP-wrapped models (DTensors), we need to manually assign values
+            # because set_model_state_dict() doesn't handle regular tensor -> DTensor conversion
             if filtered_state_dict:
                 logger.info(f"Loading {len(filtered_state_dict)} weights into model...")
-                set_model_state_dict(
-                    self,
-                    model_state_dict=filtered_state_dict,
-                    options=StateDictOptions(strict=False)
-                )
+            
+                # Check if model has DTensors (FSDP-wrapped)
+                has_dtensors = any(isinstance(p, DTensor) for p in model_state_dict.values())
+                
+                if has_dtensors:
+                    logger.info("Model contains DTensors (FSDP-wrapped), assigning to local shards...")
+                    _load_dtensor_state_dict(model_state_dict, filtered_state_dict)
+                else:
+                    # No DTensors - use standard set_model_state_dict
+                    set_model_state_dict(
+                        self,
+                        model_state_dict=filtered_state_dict,
+                        options=StateDictOptions(strict=False)
+                    )
+                    logger.info(f"Loaded {len(filtered_state_dict)} weights using set_model_state_dict")
+                
                 logger.info(
                     f"✓ Successfully loaded {len(filtered_state_dict)} pretrained weights from {pretrained_weights_path}. "
                     f"Missing keys: {len(missing_keys)}, Unexpected keys: {len(unexpected_keys)}"
@@ -365,7 +429,7 @@ class WanModel(torch.nn.Module):
             ).reshape(f * h * w, 1, -1)
         )
         # Ensure freqs is on the same device as x (important for FSDP/meta device)
-        # Note: freqs are complex tensors (for RoPE), so we only move device, not dtype
+        # Note: freqs are now real tensors (cos/sin pairs) instead of complex for better torch.compile support
         if freqs.device != x.device:
             freqs = freqs.to(device=x.device)
 
@@ -379,437 +443,6 @@ class WanModel(torch.nn.Module):
         x = self.unpatchify(x, (f, h, w))
         return x
         
-
-class _WanModel(nn.Module, ModelProtocol):
-    """
-    Transformer model for flow matching on sequences.
-
-    Args:
-        model_args: WanModelArgs.
-
-    Attributes:
-        model_args (TransformerModelArgs): Model configuration arguments.
-    """
-
-    def __init__(self, model_args: WanModelArgs):
-        super().__init__()
-
-        self.model_args = model_args
-
-        self.in_dim = model_args.in_dim
-        self.out_dim = model_args.out_dim
-        if model_args.hidden_dim % model_args.num_heads != 0:
-            raise ValueError(
-                f"Hidden size {model_args.hidden_dim} must be divisible by num_heads {model_args.num_heads}"
-            )
-        # pe_dim = model_args.hidden_dim // model_args.num_heads
-        # if sum(model_args.axes_dim) != pe_dim:
-        #     raise ValueError(
-        #         f"Got {model_args.axes_dim} but expected positional dim {pe_dim}"
-        #     )
-        self.hidden_dim = model_args.hidden_dim
-        self.num_heads = model_args.num_heads
-        # self.pe_embedder = EmbedND(
-        #     dim=pe_dim, theta=model_args.theta, axes_dim=model_args.axes_dim
-        # )
-        self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
-        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.vector_in = MLPEmbedder(model_args.vec_in_dim, self.hidden_size)
-        self.txt_in = nn.Linear(model_args.context_in_dim, self.hidden_size)
-
-        self.double_blocks = nn.ModuleList(
-            [
-                DoubleStreamBlock(
-                    self.hidden_size,
-                    self.num_heads,
-                    mlp_ratio=model_args.mlp_ratio,
-                    qkv_bias=model_args.qkv_bias,
-                )
-                for _ in range(model_args.depth)
-            ]
-        )
-
-        self.single_blocks = nn.ModuleList(
-            [
-                SingleStreamBlock(
-                    self.hidden_size, self.num_heads, mlp_ratio=model_args.mlp_ratio
-                )
-                for _ in range(model_args.depth_single_blocks)
-            ]
-        )
-
-        self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
-
-    def init_weights(self, buffer_device=None):
-        # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
-        # initialize Linear Layers: img_in, txt_in
-        nn.init.xavier_uniform_(self.img_in.weight)
-        nn.init.constant_(self.img_in.bias, 0)
-        nn.init.xavier_uniform_(self.txt_in.weight)
-        nn.init.constant_(self.txt_in.bias, 0)
-
-        # Initialize time_in, vector_in (MLPEmbedder)
-        self.time_in.init_weights(init_std=0.02)
-        self.vector_in.init_weights(init_std=0.02)
-
-        # Initialize transformer blocks:
-        for block in self.single_blocks:
-            block.init_weights()
-        for block in self.double_blocks:
-            block.init_weights()
-
-        # Zero-out output layers:
-        self.final_layer.init_weights()
-
-    def forward(
-        self,
-        img: Tensor,
-        img_ids: Tensor,
-        txt: Tensor,
-        txt_ids: Tensor,
-        timesteps: Tensor,
-        y: Tensor,
-    ) -> Tensor:
-        if img.ndim != 3 or txt.ndim != 3:
-            raise ValueError("Input img and txt tensors must have 3 dimensions.")
-
-        # running on sequences img
-        img = self.img_in(img)
-        vec = self.time_in(timestep_embedding(timesteps, 256))
-        vec = vec + self.vector_in(y)
-        txt = self.txt_in(txt)
-
-        ids = torch.cat((txt_ids, img_ids), dim=1)
-        pe = self.pe_embedder(ids)
-
-        for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
-
-        img = torch.cat((txt, img), 1)
-        for block in self.single_blocks:
-            img = block(img, vec=vec, pe=pe)
-        img = img[:, txt.shape[1] :, ...]
-
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-        return img
-
-
-class WanModel1x_(torch.nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        in_dim: int,
-        ffn_dim: int,
-        out_dim: int,
-        text_dim: int,
-        freq_dim: int,
-        eps: float,
-        patch_size: Tuple[int, int, int],
-        num_heads: int,
-        num_layers: int,
-        has_image_input: bool,
-        has_image_pos_emb: bool = False,
-        has_ref_conv: bool = False,
-        add_control_adapter: bool = False,
-        in_dim_control_adapter: int = 24,
-        seperated_timestep: bool = False,
-        require_vae_embedding: bool = True,
-        require_clip_embedding: bool = True,
-        fuse_vae_embedding_in_latents: bool = False,
-        use_robot_conditioning: bool = True,
-        robot_state_dim: int = 25,
-        adaln_mode: str = "additive",  # "additive" or "multiplicative"
-        robot_temporal_mode: str = "downsample",  # "downsample", "full", "adaptive"
-        r_dim: int = 256,
-        cfg_training: bool = False,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.in_dim = in_dim
-        self.freq_dim = freq_dim
-        self.num_heads = num_heads  # Store num_heads for recomputing freqs on meta device
-        self.has_image_input = has_image_input
-        self.patch_size = patch_size
-        self.seperated_timestep = seperated_timestep
-        self.require_vae_embedding = require_vae_embedding
-        self.require_clip_embedding = require_clip_embedding
-        self.fuse_vae_embedding_in_latents = fuse_vae_embedding_in_latents
-
-        self.r_dim = r_dim
-        self.cfg_training = cfg_training
-
-        # Validate adaln_mode parameter
-        assert adaln_mode in ["additive", "multiplicative"], (
-            f"adaln_mode must be 'additive' or 'multiplicative', got {adaln_mode}"
-        )
-        self.adaln_mode = adaln_mode
-
-        assert robot_temporal_mode in [
-            "downsample",
-            "full"
-        ], (
-            f"robot_temporal_mode must be 'downsample' or 'full', got {robot_temporal_mode}"
-        )
-        self.robot_temporal_mode = robot_temporal_mode
-
-        self.patch_embedding = nn.Conv3d(
-            in_dim, dim, kernel_size=patch_size, stride=patch_size
-        )
-        self.text_embedding = nn.Sequential(
-            nn.Linear(text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim)
-        )
-        self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim)
-        )
-        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
-        self.blocks = nn.ModuleList(
-            [
-                DiTBlock(
-                    has_image_input,
-                    dim,
-                    num_heads,
-                    ffn_dim,
-                    eps,
-                    use_robot_conditioning,
-                    adaln_mode,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-
-        self.use_robot_conditioning = use_robot_conditioning
-        if self.use_robot_conditioning:
-            if self.cfg_training:
-                self.no_states_token = nn.Parameter(
-                    torch.randn(1, 1, self.r_dim) * 0.02
-                )
-            else:
-                self.no_states_token = None
-
-            # B,t,25 -> B,t,r_dim
-            # Robot state processing with sinusoidal embeddings
-            # Indices 0-20: joint angles, 21-22: binary hand states, 23-24: velocities
-            self.robot_state_compression = nn.Sequential(
-                nn.Linear(
-                    71, self.r_dim
-                ),  # 23 original + 23 sin + 23 cos + 2 binary = 71
-                nn.SiLU(),
-                nn.Linear(self.r_dim, self.r_dim),
-            )
-            # Temporal compression based on the robot_temporal_mode
-            if self.robot_temporal_mode == "downsample":
-                self.robot_temporal_compression = nn.Sequential(
-                    nn.Conv1d(
-                        self.r_dim, self.r_dim, kernel_size=3, stride=2, padding=1
-                    ),
-                    nn.SiLU(),
-                    nn.GroupNorm(8, self.r_dim),
-                    nn.Conv1d(
-                        self.r_dim, self.r_dim, kernel_size=3, stride=2, padding=1
-                    ),
-                    nn.SiLU(),
-                    nn.GroupNorm(8, self.r_dim),
-                )
-            elif self.robot_temporal_mode == "full":
-                self.robot_temporal_compression = nn.Sequential(
-                    nn.Conv1d(
-                        self.r_dim, self.r_dim, kernel_size=5, stride=4, padding=2
-                    ),
-                    nn.SiLU(),
-                    nn.GroupNorm(8, self.r_dim),
-                    nn.Conv1d(
-                        self.r_dim, self.r_dim, kernel_size=5, stride=3, padding=1
-                    ),
-                    nn.SiLU(),
-                    nn.GroupNorm(8, self.r_dim),
-                )
-            # (B, t_l, r_dim) -> (B, t_l, dim)
-            self.r_embedding = nn.Sequential(
-                nn.Linear(self.r_dim, dim), nn.SiLU(), nn.Linear(dim, dim)
-            )
-            self.r_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
-
-        self.head = Head(dim, out_dim, patch_size, eps)
-        head_dim = dim // num_heads
-        self.freqs = precompute_freqs_cis_3d(head_dim)
-
-
-
-    @staticmethod
-    def _add_sinusoids_global(x):
-        # x: (B, T, 8) - all continuous (legs + neck + velocities)
-        sin = torch.sin(x)
-        cos = torch.cos(x)
-        return torch.cat([x, sin, cos], dim=-1)  # (B, T, 24)
-
-    @staticmethod
-    def _add_sinusoids_fine(x):
-        # x: (B, T, 17) where 0-14 are continuous joints, 15-16 are binary hands
-        continuous = x[:, :, :15]  # joints 6-20
-        binary = x[:, :, 15:]  # hand states 21-22
-        sin = torch.sin(continuous)
-        cos = torch.cos(continuous)
-        return torch.cat([continuous, sin, cos, binary], dim=-1)  # (B, T, 47)
-
-    @staticmethod
-    def _add_sinusoids_unified(x):
-        # x: (B, T, 25) - all robot state features
-        # indices 0-20: joint angles (continuous), 21-22: binary hand states, 23-24: velocities (continuous)
-        continuous = torch.cat([x[:, :, :21], x[:, :, 23:25]], dim=-1)  # (B, T, 23)
-        binary = x[:, :, 21:23]  # (B, T, 2)
-        sin = torch.sin(continuous)
-        cos = torch.cos(continuous)
-        return torch.cat([continuous, sin, cos, binary], dim=-1)  # (B, T, 71)
-
-    @staticmethod
-    def sinusoidal_embedding_1d_batched(dim, position):
-        """
-        Args:
-            dim: embedding dimension
-            position: tensor of shape (B, T) where B is batch size, T is sequence length
-        Returns:
-            tensor of shape (B, T, dim)
-        """
-        B, T = position.shape
-
-        # Reshape to (B*T,) to process all elements at once
-        position_flat = position.view(-1)
-
-        # Apply the original function
-        sinusoid = torch.outer(
-            position_flat.type(torch.float64),
-            torch.pow(
-                10000,
-                -torch.arange(
-                    dim // 2, dtype=torch.float64, device=position.device
-                ).div(dim // 2),
-            ),
-        )
-        x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
-        x = x.to(position.dtype)
-
-        # Reshape back to (B, T, dim)
-        return x.view(B, T, dim)
-
-    def patchify(
-        self,
-        x: torch.Tensor,
-    ):
-        x = self.patch_embedding(x)
-        grid_size = x.shape[2:]
-        x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
-        return x, grid_size  # x, grid_size: (f, h, w)
-
-    def unpatchify(self, x: torch.Tensor, grid_size: torch.Tensor):
-        return rearrange(
-            x,
-            "b (f h w) (x y z c) -> b c (f x) (h y) (w z)",
-            f=grid_size[0],
-            h=grid_size[1],
-            w=grid_size[2],
-            x=self.patch_size[0],
-            y=self.patch_size[1],
-            z=self.patch_size[2],
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        timesteps: torch.Tensor,
-        t_mod: torch.Tensor,
-        context: torch.Tensor,
-        robot_states: Optional[torch.Tensor] = None,
-        use_gradient_checkpointing: bool = False,
-        use_gradient_checkpointing_offload: bool = False,
-        num_cond_frames: int = 17,
-        **kwargs,
-    ):
-        # Simple timestep processing - pipeline handles the complex separated timestep logic
-        # t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timesteps))
-        # t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
-        # context = self.text_embedding(context)
-        # context = torch.cat([context] * x.shape[0] , dim=0)
-
-        # if self.has_image_input:
-        #     x = torch.cat([x, y], dim=1)  # (b, c_x + c_y, f, h, w)
-        #     clip_embdding = self.img_emb(clip_feature)
-        #     context = torch.cat([clip_embdding, context], dim=1)
-
-        # Robot states are now pre-processed by the pipeline
-        r_states = robot_states
-
-        x, (f, h, w) = self.patchify(x)
-        # Handle meta device: if freqs are on meta, recompute them on the correct device
-        # This happens when FSDP wraps the model and buffers end up on meta device
-        if self.freqs[0].device.type == "meta":
-            # Recompute freqs on the correct device
-            head_dim = self.dim // self.num_heads
-            freqs_tuple = precompute_freqs_cis_3d(head_dim)
-            # Move to correct device (freqs are complex, so we don't change dtype)
-            freqs_tuple = (
-                freqs_tuple[0].to(device=x.device),
-                freqs_tuple[1].to(device=x.device),
-                freqs_tuple[2].to(device=x.device),
-            )
-        else:
-            freqs_tuple = self.freqs
-
-        freqs = (
-            torch.cat(
-                [
-                    freqs_tuple[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                    freqs_tuple[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                    freqs_tuple[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-                ],
-                dim=-1,
-            )
-            .reshape(f * h * w, 1, -1)
-        )
-        # Ensure freqs is on the same device as x (important for FSDP/meta device)
-        # Note: freqs are complex tensors (for RoPE), so we only move device, not dtype
-        if freqs.device != x.device:
-            freqs = freqs.to(device=x.device)
-
-        def create_custom_forward(module):
-            def custom_forward(*inputs):
-                return module(*inputs)
-
-            return custom_forward
-
-        for block in self.blocks:
-            if self.training and use_gradient_checkpointing:
-                if use_gradient_checkpointing_offload:
-                    with torch.autograd.graph.save_on_cpu():
-                        x = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(block),
-                            x,
-                            context,
-                            t_mod,
-                            freqs,
-                            r_states,
-                            use_reentrant=False,
-                        )
-                else:
-                    x = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        x,
-                        context,
-                        t_mod,
-                        freqs,
-                        r_states,
-                        use_reentrant=False,
-                    )
-            else:
-                x = block(x, context, t_mod, freqs, r_states)
-
-        x = self.head(x, timesteps)
-        x = self.unpatchify(x, (f, h, w))
-        return x
-
-    @staticmethod
-    def state_dict_converter():
-        return WanModelStateDictConverter()
-
 
 class WanModelStateDictConverter:
     def __init__(self):

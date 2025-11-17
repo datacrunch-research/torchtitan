@@ -11,7 +11,7 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 1
+log_freq = 10
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
@@ -31,7 +31,7 @@ warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
 [training]
-local_batch_size = 192
+local_batch_size = 2
 max_norm = 1.0  # grad norm clipping
 steps = 30_000
 dataset = "1xwm"
@@ -45,7 +45,7 @@ img_size = 256
 num_workers = 10 # Number of worker processes for data loading (0 = main process only)
 persistent_workers = true  # Keep workers alive across epochs (requires num_workers > 0)
 pin_memory = true  # Pin memory for faster GPU transfer (recommended when using GPU)
-prefetch_factor = 1  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
+prefetch_factor = 2  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -66,14 +66,14 @@ mode = "full"
 # GB300 has compute capability 10.3 (SM 103), but Triton generates sm_103a which ptxas doesn't recognize
 # The "aot_eager" backend avoids Triton and should work on GB300, though performance may be lower than inductor
 # Once Triton/PyTorch adds proper GB300 (sm_103) support, switch back to backend = "inductor" for best performance
-enable = true
+enable = false
 components = ["model", "loss"]  # Compile both model and loss function
-backend = "aot_eager"  # Use aot_eager backend (no Triton) to avoid sm_103a compilation errors
+backend = "inductor"  # Use aot_eager backend (no Triton) to avoid sm_103a compilation errors
 
 [checkpoint]
 enable = true
 folder = "checkpoint"
-interval = 10
+interval = 100
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]
