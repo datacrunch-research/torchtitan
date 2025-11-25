@@ -16,15 +16,19 @@ What TorchTitan people had for FLUX.1:
 
 
 - [x] add `wan_dataset` unit test
-- [ ] get the fwd pass
+- [x] get the fwd pass
     - currently is possible to run `torchrun --nproc_per_node=4 torchtitan/experiments/wan/train.py  --job.config_file torchtitan/experiments/wan/train_configs/wan_cc1xm.toml  2>&1 | tee debug.err`
 - [ ] update [`README.md`](./README.md)
 - [ ] update configs [`train_configs/wan_cc1xm.toml`](./train_configs/wan_cc1xm.toml) and [`train_configs/wan_1xwm.toml`](./train_configs/wan_1xwm.toml)
 - [ ] [`train.py`](./train.py:135) has the precomputed embeddings as class attributes, but it should be handled better
-- [ ] [`wan_vae.py`](./model/wan_vae.py:1495) Refactor `WanVideoVAE.encode()` to accept tensor (B, C, T, H, W) directly instead of list
-    - Currently accepts both list of (C, T, H, W) tensors or single (B, C, T, H, W) tensor
-    - Should standardize on tensor input for better performance and cleaner API
-- [ ] [`wan_vae.py`](./model/wan_vae.py:1527) Refactor `WanVideoVAE.decode()` to accept tensor (B, C, T, H, W) directly instead of list
-    - Currently accepts both list of (C, T, H, W) tensors or single (B, C, T, H, W) tensor
-    - Should standardize on tensor input for better performance and cleaner API
+- [x] [`wan_vae.py`](./model/wan_vae.py:1509) Refactor `WanVideoVAE.encode()` to accept tensor (B, C, T, H, W) directly instead of list
+    - Now accepts `videos: torch.Tensor` with shape (B, C, T, H, W) directly
+    - Validates input is a 5D tensor and processes batches efficiently
+- [x] [`wan_vae.py`](./model/wan_vae.py:1570) Refactor `WanVideoVAE.decode()` to accept tensor (B, C, T, H, W) directly instead of list
+    - Now accepts `hidden_states: torch.Tensor` with shape (B, z_dim, T', H', W') directly
+    - Validates input is a 5D tensor and processes batches efficiently
+- [ ] [`wan_datasets.py`](./wan_datasets.py:535-537) Fix dataloader configuration for testing
+    - Currently has a workaround: when `num_workers == 0` and `prefetch_factor != 1.`, it sets `prefetch_factor = None` to prevent test failures
+    - Need to add proper code to pass the correct `prefetch_factor`/`num_workers`/`persistent_workers` values when testing
+    - This workaround is needed because the `dataset_wan` test fails without it
 

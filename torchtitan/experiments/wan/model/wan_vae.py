@@ -1610,9 +1610,13 @@ class WanVideoVAE(nn.Module):
             # For tiled decoding, process each latent in the batch separately
             # since tiling is done per-video
             videos = []
+            logger.info(f"B: {B}")
             for b in range(B):
                 # Extract single latent from batch: (1, z_dim, T', H', W')
                 hidden_state = hidden_states[b:b+1]
+                logger.info(f"Hidden state shape: {hidden_state.shape}")
+                hidden_state = hidden_state.transpose(1, 2)
+                logger.info(f"Hidden state shape: {hidden_state.shape}")
                 video = self.tiled_decode(hidden_state, device, tile_size, tile_stride)
                 videos.append(video)
             # Stack results: (B, C, T, H, W)
@@ -1720,6 +1724,7 @@ class VideoVAE38_(VideoVAE_):
 
     def decode(self, z, scale):
         self.clear_cache()
+        logger.info(f"Z shape: {z.shape}")
         if isinstance(scale[0], torch.Tensor):
             scale = [s.to(dtype=z.dtype, device=z.device) for s in scale]
             z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
