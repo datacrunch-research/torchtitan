@@ -89,7 +89,8 @@ class Validation:
     """Directory to save image generated/sampled from the model"""
     all_timesteps: bool = False
     """Whether to generate all stratified timesteps per sample or use round robin"""
-
+    num_cond_frames: int = 5
+    """Number of frames to condition on"""
 
 @dataclass
 class Inference:

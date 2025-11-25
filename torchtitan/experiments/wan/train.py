@@ -141,23 +141,26 @@ class WanTrainer(Trainer):
         
         # Delete T5 encoder after precomputation to free memory
         # It's no longer needed since we use precomputed embeddings
-        if not job_config.validation.enable:
-            logger.info("  - Deleting T5 encoder (no longer needed, using precomputed embeddings)...")
-            del self.t5_encoder
-            # Also delete tokenizer as it's no longer needed
-            del t5_tokenizer
-            logger.info("  ✓ Encoder and tokenizer deleted to free memory")
-        else:
-            logger.info("  - Keeping encoder (validation is enabled and may need it)")
+        # if not job_config.validation.enable:
+        logger.info("  - Deleting T5 encoder (no longer needed, using precomputed embeddings)...")
+        del self.t5_encoder
+        self.t5_encoder = None
+        # Also delete tokenizer as it's no longer needed
+        del t5_tokenizer
+        
+        logger.info("  ✓ Encoder and tokenizer deleted to free memory")
+        # else:
+            # logger.info("  - Keeping encoder (validation is enabled and may need it)")
 
         if job_config.validation.enable:
             logger.info("Initializing Wan validator...")
+            logger.info(f"t5_encoder is None {self.t5_encoder is None}")
             self.validator.wan_init(
                 device=self.device,
                 _dtype=self._dtype,
-                # autoencoder=self.autoencoder,
                 wan_video_vae=self.wan_video_vae,
                 t5_encoder=self.t5_encoder,
+                precomputed_t5_embedding=self._precomputed_t5_embedding
             )
             logger.info("Wan validator initialized")
             # TODO: also here add the validation code for wan

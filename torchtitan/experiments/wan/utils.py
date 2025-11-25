@@ -132,7 +132,8 @@ def generate_noise_latent(
     width: int,
     device: str | torch.device,
     dtype: torch.dtype,
-    seed: int | None = None,
+    temporal_dim: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> Tensor:
     """Generate noise latents for the Flux flow model. The random seed will be set at the beginning of training.
 
@@ -148,10 +149,13 @@ def generate_noise_latent(
             Shape: [num_samples, LATENT_CHANNELS, height // IMG_LATENT_SIZE_RATIO, width // IMG_LATENT_SIZE_RATIO]
 
     """
-    LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 16, 8
+    # this are specific to the Wan2.2-VAE model
+    LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 48, 16
+    TEMPORAL_DIM = temporal_dim if temporal_dim is not None else 6
     return torch.randn(
         bsz,
         LATENT_CHANNELS,
+        TEMPORAL_DIM,
         height // IMAGE_LATENT_SIZE_RATIO,
         width // IMAGE_LATENT_SIZE_RATIO,
         dtype=dtype,
@@ -209,6 +213,7 @@ def pack_latents(x: Tensor) -> Tensor:
             Shape: (bsz, (temporal * latent_height // 2 * latent_width // 2), channels * 4)
     """
     PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+    logger.info(f"Packing latents: {x.shape}")
     b, c, t, h, w = x.shape
     h_patches = h // PATCH_HEIGHT
     w_patches = w // PATCH_WIDTH

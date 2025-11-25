@@ -15,7 +15,7 @@ log_freq = 10
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
-enable_wandb = true
+enable_wandb = false
 
 [model]
 name = "wan"
@@ -41,7 +41,7 @@ clip_length = 77  # Number of frames per clip
 window_size = 8  # Window size for sampling clips
 robot_temporal_mode = "downsample"  # How to handle robot state temporal alignment
 classifier_free_guidance_prob = 0.447
-img_size = 256
+img_size = 512
 num_workers = 10 # Number of worker processes for data loading (0 = main process only)
 persistent_workers = true  # Keep workers alive across epochs (requires num_workers > 0)
 pin_memory = true  # Pin memory for faster GPU transfer (recommended when using GPU)
@@ -79,13 +79,14 @@ export_dtype = "float32"
 async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [validation]
-enable = false
+enable = true
 dataset = "1xwm"  # Can use same dataset for validation
 dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"  # Validation dataset path
 local_batch_size = 1
 steps = 6   # Recommended value with the current settings and world_size=8
-freq = 1000
-enable_classifier_free_guidance = true
+freq = 1
+enable_classifier_free_guidance = false
+num_cond_frames = 5
 classifier_free_guidance_scale = 5.0
 denoising_steps = 50
 save_img_count = 50
