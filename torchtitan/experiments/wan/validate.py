@@ -20,7 +20,7 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.wan.wan_datasets import build_wan_validation_dataloader
-from torchtitan.experiments.wan.inference.sampling import generate_video, save_image
+from torchtitan.experiments.wan.inference.sampling import generate_video, save_video
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 
 from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
@@ -156,8 +156,16 @@ class WanValidator(Validator):
                     precomputed_t5_embedding=self.precomputed_t5_embedding,
                 )
                 logger.info(f"Video shape: {video.shape}")
-                raise NotImplementedError("Not implemented")
 
+                save_video(
+                    name=f"video_rank{str(torch.distributed.get_rank())}_{step}.mp4",
+                    output_dir=os.path.join(
+                        self.job_config.job.dump_folder,
+                        self.job_config.validation.save_img_folder,
+                    ),
+                    video=video,
+                    add_sampling_metadata=True,
+                )
                 # save_image(
                 #     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                 #     output_dir=os.path.join(
@@ -178,12 +186,18 @@ class WanValidator(Validator):
                 wan_video_vae=self.wan_video_vae,
                 t5_encoder=self.t5_encoder,
                 batch=input_dict,
+                precomputed_t5_embedding=self.precomputed_t5_embedding,
             )
-            labels = input_dict["img_encodings"].to(device_type)
+            labels = input_dict["latents"]
+            # labels = input_dict["img_encodings"].to(device_type)
             t5_encodings = input_dict["t5_encodings"]
+            logger.info(f"T5 encodings shape: {t5_encodings.shape}")
+            logger.info(f"Labels shape: {labels.shape}")
 
             bsz = labels.shape[0]
 
+            raise NotImplementedError("Not implemented")
+            # TODO: Add here the sampling code for Wan model
             # If using all_timesteps we generate all 8 timesteps and expand our batch inputs here
             if self.all_timesteps:
                 stratified_timesteps = torch.tensor(

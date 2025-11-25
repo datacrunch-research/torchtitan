@@ -119,6 +119,7 @@ def preprocess_data(
         device=device,
         tiled=False,
     )
+    logger.info(f"Video latents shape: {video_latents.shape}")
     batch["latents"] = video_latents.to(device=device, dtype=dtype)
 
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
