@@ -2,4 +2,4 @@ transformers>=4.51.1
 einops
 sentencepiece
 pillow
-decord
+decord2>=2.0.0
