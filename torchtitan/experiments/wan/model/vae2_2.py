@@ -2,14 +2,15 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.amp as amp
+import torchvision
+from torchmetrics.functional.image import peak_signal_noise_ratio
 
 from typing import Optional, List
 
 from einops import rearrange
 from icecream import ic
 
-import logging
-logger = logging.getLogger(__name__)
+from torchtitan.tools.logging import logger
 
 __all__ = ["Wan2_2_VAE"]
 
@@ -42,7 +43,7 @@ class Resample(nn.Module):
 
         if mode == "upsample2d":
             self.resample = nn.Sequential(
-                Upsample(), # TODO
+                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"), 
                 nn.Conv2d(
                     in_channels=dim, 
                     out_channels=dim,
@@ -52,7 +53,7 @@ class Resample(nn.Module):
             )
         elif mode == "upsample3d":
             self.resample = nn.Sequential(
-                Upsample(), #TODO
+                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(
                     in_channels=dim,
                     out_channels=dim,
@@ -123,14 +124,9 @@ class Resample(nn.Module):
                             dim=2,
                         )
                     if feat_cache[idx] == "Rep":
-                        ic(x.shape)
                         x = self.time_conv(x)
-                        ic(x.shape, "after time_conv")
                     else:
-                        ic(x.shape)
-                        ic(feat_cache[idx].shape)
                         x = self.time_conv(x, feat_cache[idx])
-                        ic(x.shape, "after time_conv w/ feat_cache[idx]")
                     feat_cache[idx] = cache_x
                     feat_idx[0] += 1
                     x = x.reshape(b, 2, c, t, h, w)
@@ -139,13 +135,10 @@ class Resample(nn.Module):
                         dim=3,
                     )
                     x = x.reshape(b, c, t * 2, h, w)
-                    ic(x.shape)
         
         t = x.shape[2]
-        ic(x.shape)
         x = rearrange(x, "b c t h w -> (b t) c h w")
-        ic(x.shape)
-        x = self.resample(x) # TODO: what does this do?
+        x = self.resample(x) 
         x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
 
         if self.mode == "downsample3d":
@@ -164,130 +157,7 @@ class Resample(nn.Module):
 
 class Upsample(nn.Upsample):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return
-
-class Resample_(nn.Module):
-
-    def __init__(self, dim, mode):
-        assert mode in (
-            "none",
-            "upsample2d",
-            "upsample3d",
-            "downsample2d",
-            "downsample3d",
-        )
-        super().__init__()
-        self.dim = dim
-        self.mode = mode
-
-        # layers
-        if mode == "upsample2d":
-            self.resample = nn.Sequential(
-                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
-                nn.Conv2d(dim, dim, 3, padding=1),
-            )
-        elif mode == "upsample3d":
-            self.resample = nn.Sequential(
-                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
-                nn.Conv2d(dim, dim, 3, padding=1),
-                # nn.Conv2d(dim, dim//2, 3, padding=1)
-            )
-            self.time_conv = CausalConv3d(
-                dim, dim * 2, (3, 1, 1), padding=(1, 0, 0))
-        elif mode == "downsample2d":
-            self.resample = nn.Sequential(
-                nn.ZeroPad2d((0, 1, 0, 1)),
-                nn.Conv2d(dim, dim, 3, stride=(2, 2)))
-        elif mode == "downsample3d":
-            self.resample = nn.Sequential(
-                nn.ZeroPad2d((0, 1, 0, 1)),
-                nn.Conv2d(dim, dim, 3, stride=(2, 2)))
-            self.time_conv = CausalConv3d(
-                dim, dim, (3, 1, 1), stride=(2, 1, 1), padding=(0, 0, 0))
-        else:
-            self.resample = nn.Identity()
-
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
-        b, c, t, h, w = x.size()
-        if self.mode == "upsample3d":
-            if feat_cache is not None:
-                idx = feat_idx[0]
-                if feat_cache[idx] is None:
-                    feat_cache[idx] = "Rep"
-                    feat_idx[0] += 1
-                else:
-                    cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                    if (cache_x.shape[2] < 2 and feat_cache[idx] is not None and
-                            feat_cache[idx] != "Rep"):
-                        # cache last frame of last two chunk
-                        cache_x = torch.cat(
-                            [
-                                feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                                    cache_x.device),
-                                cache_x,
-                            ],
-                            dim=2,
-                        )
-                    if (cache_x.shape[2] < 2 and feat_cache[idx] is not None and
-                            feat_cache[idx] == "Rep"):
-                        cache_x = torch.cat(
-                            [
-                                torch.zeros_like(cache_x).to(cache_x.device),
-                                cache_x
-                            ],
-                            dim=2,
-                        )
-                    if feat_cache[idx] == "Rep":
-                        x = self.time_conv(x)
-                    else:
-                        x = self.time_conv(x, feat_cache[idx])
-                    feat_cache[idx] = cache_x
-                    feat_idx[0] += 1
-                    x = x.reshape(b, 2, c, t, h, w)
-                    x = torch.stack((x[:, 0, :, :, :, :], x[:, 1, :, :, :, :]),
-                                    3)
-                    x = x.reshape(b, c, t * 2, h, w)
-        t = x.shape[2]
-        x = rearrange(x, "b c t h w -> (b t) c h w")
-        x = self.resample(x)
-        x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
-
-        if self.mode == "downsample3d":
-            if feat_cache is not None:
-                idx = feat_idx[0]
-                if feat_cache[idx] is None:
-                    feat_cache[idx] = x.clone()
-                    feat_idx[0] += 1
-                else:
-                    cache_x = x[:, :, -1:, :, :].clone()
-                    x = self.time_conv(
-                        torch.cat([feat_cache[idx][:, :, -1:, :, :], x], 2))
-                    feat_cache[idx] = cache_x
-                    feat_idx[0] += 1
-        return x
-
-    def init_weight(self, conv):
-        conv_weight = conv.weight.detach().clone()
-        nn.init.zeros_(conv_weight)
-        c1, c2, t, h, w = conv_weight.size()
-        one_matrix = torch.eye(c1, c2)
-        init_matrix = one_matrix
-        nn.init.zeros_(conv_weight)
-        conv_weight.data[:, :, 1, 0, 0] = init_matrix  # * 0.5
-        conv.weight = nn.Parameter(conv_weight)
-        nn.init.zeros_(conv.bias.data)
-
-    def init_weight2(self, conv):
-        conv_weight = conv.weight.data.detach().clone()
-        nn.init.zeros_(conv_weight)
-        c1, c2, t, h, w = conv_weight.size()
-        init_matrix = torch.eye(c1 // 2, c2)
-        conv_weight[:c1 // 2, :, -1, 0, 0] = init_matrix
-        conv_weight[c1 // 2:, :, -1, 0, 0] = init_matrix
-        conv.weight = nn.Parameter(conv_weight)
-        nn.init.zeros_(conv.bias.data)
-
-
+        return super().forward(x.float()).type_as(x)
 
 
 class CausalConv3d(nn.Conv3d):
@@ -348,167 +218,39 @@ class CausalConv3d(nn.Conv3d):
         return x
 
 
-def patchify(
-    x: torch.Tensor,
-    patch_size: int = 2,
-) -> torch.Tensor:
-    """
-    Patchify input tensor by grouping spatial dimensions into patches.
-    
-    For 4D input [B, C, H, W]: 
-        Output: [B, C*patch_size*patch_size, H//patch_size, W//patch_size]
-    For 5D input [B, C, T, H, W]:
-        Output: [B, C*patch_size*patch_size, T, H//patch_size, W//patch_size]
-    
-    Uses pure torch operations (unfold + reshape) for better performance than einops.
-    """
-    ic(x.dim())
+def patchify(x, patch_size):
     if patch_size == 1:
         return x
-    
     if x.dim() == 4:
-        # Input x.shape: [B, C, H, W]
-        assert x.shape[2] % patch_size == 0 and x.shape[3] % patch_size == 0, "H and W must be divisible by patch_size"
-        # Output x.shape: [B, C*patch_size*patch_size, H//patch_size, W//patch_size]
-        b, c, h, w = x.shape
-        h_patches = h // patch_size
-        w_patches = w // patch_size
-        x = x.unfold(2, patch_size, patch_size) 
-        logger.info(f"x.shape: {x.shape}")
-        x = x.unfold(3, patch_size, patch_size)
-        logger.info(f"x.shape: {x.shape}")
-
-        # x = x.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
-        x = x.permute(0, 2, 3, 1, 4, 5)
-        logger.info(f"x.shape: {x.shape}")
-        x = x.contiguous()
-        logger.info(f"x.is_contiguous: {x.is_contiguous()}")
-        x = x.reshape(b, c * patch_size * patch_size, h_patches, w_patches)
-        logger.info(f"x.shape: {x.shape}")
-        return x
+        x = rearrange(
+            x, "b c (h q) (w r) -> b (c r q) h w", q=patch_size, r=patch_size)
     elif x.dim() == 5:
-        # Original code
-        # x = rearrange(x, "b c f (h q) (w r) -> b (c r q) f h w", q=patch_size, r=patch_size)
-        assert x.shape[3] % patch_size == 0 and x.shape[4] % patch_size == 0
-        b, c, t, h, w = x.shape
-        h_patches = h // patch_size
-        w_patches = w // patch_size 
-        ic(x.shape)
-        ic(h_patches)
-        ic(w_patches)
-
-        x = x.unfold(dimension=3, size=patch_size, step=patch_size)
-        ic(x.shape)
-        x = x.unfold(dimension=4, size=patch_size, step=patch_size)
-        ic(x.shape)
-
-        x = x.permute(0, 2, 3, 4, 1, 5, 6)
-        ic(x.shape)
-        ic(x.is_contiguous())
-        x = x.contiguous()
-        ic(x.is_contiguous())
-        
-        x = x.reshape(b, c * patch_size * patch_size, t, h_patches, w_patches)
-        ic(x.shape)
+        x = rearrange(
+            x,
+            "b c f (h q) (w r) -> b (c r q) f h w",
+            q=patch_size,
+            r=patch_size,
+        )
     else:
-        raise NotImplementedError(f"Invalid input shape: {x.shape}, expected 4D tensor")
-    return x 
-    if x.dim() == 4:
-        # Input: [B, C, H, W] where H and W are divisible by patch_size
-        # Output: [B, C*patch_size*patch_size, H//patch_size, W//patch_size]
-        b, c, h, w = x.shape
-        h_patches = h // patch_size
-        w_patches = w // patch_size
-        
-        # Use unfold to extract patches: [B, C, H, W] -> [B, C, H//patch_size, W//patch_size, patch_size, patch_size]
-        x = x.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
-        # x is now [B, C, h_patches, w_patches, patch_size, patch_size]
-        
-        # Rearrange: [B, C, h_patches, w_patches, patch_size, patch_size] 
-        #         -> [B, h_patches, w_patches, C, patch_size, patch_size]
-        #         -> [B, C*patch_size*patch_size, h_patches, w_patches]
-        x = x.permute(0, 2, 3, 1, 4, 5).contiguous()
-        x = x.reshape(b, c * patch_size * patch_size, h_patches, w_patches)
-        
-    elif x.dim() == 5:
-        # Input: [B, C, F, H, W] where H and W are divisible by patch_size
-        # Output: [B, C*patch_size*patch_size, F, H//patch_size, W//patch_size]
-        b, c, f, h, w = x.shape
-        h_patches = h // patch_size
-        w_patches = w // patch_size
-        
-        # Use unfold on spatial dimensions: [B, C, F, H, W] -> [B, C, F, H//patch_size, W//patch_size, patch_size, patch_size]
-        x = x.unfold(3, patch_size, patch_size).unfold(4, patch_size, patch_size)
-        # x is now [B, C, F, h_patches, w_patches, patch_size, patch_size]
-        
-        # Rearrange: [B, C, F, h_patches, w_patches, patch_size, patch_size]
-        #         -> [B, F, h_patches, w_patches, C, patch_size, patch_size]
-        #         -> [B, C*patch_size*patch_size, F, h_patches, w_patches]
-        x = x.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
-        x = x.reshape(b, c * patch_size * patch_size, f, h_patches, w_patches)
-        
-    else:
-        raise ValueError(f"Invalid input shape: {x.shape}, expected 4D or 5D tensor")
-    
+        raise ValueError(f"Invalid input shape: {x.shape}")
+
     return x
 
 
-def unpatchify(
-    x: torch.Tensor,
-    patch_size: int = 2,
-) -> torch.Tensor:
-    """
-    Unpatchify input tensor by restoring spatial dimensions from patches.
-    
-    For 4D input [B, C*patch_size*patch_size, H, W]:
-        Output: [B, C, H*patch_size, W*patch_size]
-    For 5D input [B, C*patch_size*patch_size, F, H, W]:
-        Output: [B, C, F, H*patch_size, W*patch_size]
-    
-    Uses pure torch operations (reshape + permute) for better performance than einops.
-    """
+def unpatchify(x, patch_size):
     if patch_size == 1:
         return x
-    
+
     if x.dim() == 4:
-        # Input: [B, C*patch_size*patch_size, h_patches, w_patches]
-        # Output: [B, C, h_patches*patch_size, w_patches*patch_size]
-        b, c_patches, h_patches, w_patches = x.shape
-        c = c_patches // (patch_size * patch_size)
-        h = h_patches * patch_size
-        w = w_patches * patch_size
-        
-        # Reshape: [B, C*patch_size*patch_size, h_patches, w_patches]
-        #       -> [B, h_patches, w_patches, C, patch_size, patch_size]
-        x = x.reshape(b, c, patch_size, patch_size, h_patches, w_patches)
-        
-        # Rearrange: [B, C, patch_size, patch_size, h_patches, w_patches]
-        #         -> [B, C, h_patches, patch_size, w_patches, patch_size]
-        #         -> [B, C, h_patches*patch_size, w_patches*patch_size]
-        x = x.permute(0, 1, 4, 2, 5, 3).contiguous()
-        x = x.reshape(b, c, h, w)
-        
+        x = rearrange(
+            x, "b (c r q) h w -> b c (h q) (w r)", q=patch_size, r=patch_size)
     elif x.dim() == 5:
-        # Input: [B, C*patch_size*patch_size, F, h_patches, w_patches]
-        # Output: [B, C, F, h_patches*patch_size, w_patches*patch_size]
-        b, c_patches, f, h_patches, w_patches = x.shape
-        c = c_patches // (patch_size * patch_size)
-        h = h_patches * patch_size
-        w = w_patches * patch_size
-        
-        # Reshape: [B, C*patch_size*patch_size, F, h_patches, w_patches]
-        #       -> [B, F, h_patches, w_patches, C, patch_size, patch_size]
-        x = x.reshape(b, c, patch_size, patch_size, f, h_patches, w_patches)
-        
-        # Rearrange: [B, C, patch_size, patch_size, F, h_patches, w_patches]
-        #         -> [B, C, F, h_patches, patch_size, w_patches, patch_size]
-        #         -> [B, C, F, h_patches*patch_size, w_patches*patch_size]
-        x = x.permute(0, 1, 4, 5, 2, 6, 3).contiguous()
-        x = x.reshape(b, c, f, h, w)
-        
-    else:
-        raise ValueError(f"Invalid input shape: {x.shape}, expected 4D or 5D tensor")
-    
+        x = rearrange(
+            x,
+            "b (c r q) f h w -> b c f (h q) (w r)",
+            q=patch_size,
+            r=patch_size,
+        )
     return x
 
 
@@ -534,9 +276,7 @@ class AvgDown3D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         pad_t = (self.factor_t - x.shape[2] % self.factor_t) % self.factor_t
         pad = (0, 0, 0, 0, pad_t, 0)
-        ic(x.shape, "before pad")
         x = F.pad(x, pad)
-        ic(x.shape, "after pad")
 
         b, c, t, h, w = x.shape
         t_ = t // self.factor_t
@@ -551,7 +291,56 @@ class AvgDown3D(nn.Module):
         x = x.mean(dim=2)
         return x
         
+class DupUp3D(nn.Module):
+    def __init__(
+        self, 
+        in_channels: int, 
+        out_channels: int,
+        factor_t: int,
+        factor_s: int = 1
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.factor_t = factor_t
+        self.factor_s = factor_s
+        self.factor = factor_t * factor_s * factor_s
+
+        assert out_channels * self.factor % in_channels == 0 
+        self.repeats = out_channels * self.factor // in_channels
     
+    def forward(
+        self,
+        x: torch.Tensor,
+        first_chunk: bool = False
+    ) -> torch.Tensor:
+        x = x.repeat_interleave(self.repeats, dim=1)
+
+        b = x.shape[0]
+        
+        x = x.view(
+            b, 
+            self.out_channels, 
+            self.factor_t, 
+            self.factor_s,
+             self.factor_s,
+             x.shape[2], 
+             x.shape[3], 
+             x.shape[4]
+        )
+        x = x.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
+        x = x.view(
+            b, 
+            self.out_channels, 
+            x.shape[2] * self.factor_t, 
+            x.shape[4] * self.factor_s, 
+            x.shape[6] * self.factor_s
+        )
+
+        if first_chunk:
+            x = x[:, :, self.factor_t - 1:, :, :]
+        
+        return x
 
 class Down_ResidualBlock(nn.Module):
     """
@@ -599,14 +388,85 @@ class Down_ResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor, feat_cache=None, feat_idx=[0]) -> torch.Tensor:
         x_copy = x.clone()
         for module in self.downsamples:
-            ic(module)
-            ic(x.shape)
             x = module(x, feat_cache, feat_idx)
-            ic(x.shape)
         avg_shortcut = self.avg_shortcut(x_copy)
-        ic(x.shape, avg_shortcut.shape)
         x = x + avg_shortcut
         return x
+
+class Up_ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_dim: int, 
+        out_dim: int,
+        dropout: float,
+        mult:int,
+        temporal_upsample: bool = False,
+        up_flag: bool = False
+    ):
+        super().__init__()
+        if up_flag: 
+            self.avg_shortcut = DupUp3D(
+                in_channels=in_dim,
+                out_channels=out_dim,
+                factor_t=2 if temporal_upsample else 1,
+                factor_s=2 if up_flag else 1,
+            )
+        else:
+            self.avg_shortcut = None
+        
+        upsamples = []
+        for _ in range(mult):
+            upsamples.append(
+                ResidualBlock(
+                    in_dim=in_dim,
+                    out_dim=out_dim,
+                    dropout=dropout
+                )
+            )
+            in_dim = out_dim
+        if up_flag:
+            mode = "upsample3d" if temporal_upsample else "upsample2d"
+            upsamples.append(
+                Resample(
+                    dim=out_dim,
+                    mode=mode
+                )
+            )
+        self.upsamples = nn.Sequential(*upsamples)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        feat_cache = None, 
+        feat_idx = [0],
+        first_chunk: bool = False
+    ) -> torch.Tensor:
+        x_main = x.clone()
+        for module in self.upsamples:
+            x_main = module(x_main, feat_cache, feat_idx)
+        if self.avg_shortcut is not None:
+            x_shortcut = self.avg_shortcut(x, first_chunk)
+            # Ensure temporal dimensions match before addition
+            # This is important because:
+            # 1. Resample with upsample3d (main path) may produce different temporal dimensions
+            # 2. DupUp3D (shortcut path) also handles temporal upsampling differently
+            # 3. Due to different upsampling logic, they might not always match exactly
+            # 4. This can happen especially when processing frames sequentially with cache
+            if x_main.shape[2] != x_shortcut.shape[2]:
+                # Take the minimum temporal dimension and align both tensors
+                # This ensures the residual connection works correctly
+                min_t = min(x_main.shape[2], x_shortcut.shape[2])
+                logger.debug(
+                    f"Temporal dimension mismatch in Up_ResidualBlock: "
+                    f"x_main.shape[2]={x_main.shape[2]}, x_shortcut.shape[2]={x_shortcut.shape[2]}, "
+                    f"aligning to min_t={min_t}, first_chunk={first_chunk}"
+                )
+                x_main = x_main[:, :, :min_t, :, :]
+                x_shortcut = x_shortcut[:, :, :min_t, :, :]
+            return x_main + x_shortcut
+        else:
+            return x_main
+
 
 class RMS_norm(nn.Module):
     def __init__(
@@ -675,14 +535,9 @@ class ResidualBlock(nn.Module):
                 x = layer(x, feat_cache[idx])
                 feat_cache[idx] = cache_x
                 feat_idx[0] += 1
-                ic(x.shape)
-                ic(feat_cache[idx].shape)
-                ic(feat_idx[0])
             else:
                 x = layer(x)
-        ic(x.shape, h.shape)
         x = x + h
-        ic(x.shape)
         return x 
 
 class AttentionBlock(nn.Module):
@@ -710,7 +565,6 @@ class AttentionBlock(nn.Module):
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         identity = x
-        ic(x.shape,  "Causal Attn FWD")
         b, c, t, h, w = x.shape
         x = rearrange(x, "b c t h w -> (b t) c h w")
         x = self.norm(x)
@@ -726,14 +580,11 @@ class AttentionBlock(nn.Module):
 
         # TODO: why not enable the causal here in the scaled_dot_product_attention??
         x = F.scaled_dot_product_attention(query=q, key=k, value=v)
-        ic(x.shape)
         x = x.squeeze(1).permute(0, 2, 1).reshape(b*t, c, h, w)
 
         # output
         x = self.proj(x)
-        ic(f"x after proj {x.shape}")
         x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
-        ic(x.shape, identity.shape)
         x = x + identity
         return x
 
@@ -770,7 +621,6 @@ class Encoder3d(nn.Module):
 
         downsamples = []
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            ic(f"i: {i}, in_dim: {in_dim}, out_dim: {out_dim}")
             t_down_flag = (
                 temporal_downsample[i]
                 if i < len(temporal_downsample) else False
@@ -821,12 +671,10 @@ class Encoder3d(nn.Module):
         feat_idx = [0]
     ) -> torch.Tensor:
 
-        ic(x.shape, "Encoder3d")
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:,:,-CACHE_T:, :, :].clone()
             if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                ic(cache_x.shape[2])
                 # There are previous elements in the cache
                 cache_x = torch.cat(
                     [
@@ -835,27 +683,22 @@ class Encoder3d(nn.Module):
                     ],
                     dim=2,
                 )
-            ic(x.shape)
             x = self.conv1(x, feat_cache[idx])
-            ic(x.shape, "after conv1")
             feat_cache[idx] = cache_x
             feat_idx[0] += 1
         else:
             x = self.conv1(x)
-        ic(x.shape)
         for layer in self.downsamples:
             if feat_cache is not None:
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
         
-        ic(x.shape)
         for layer in self.middle:
             if isinstance(layer, ResidualBlock) and feat_cache is not None:
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
-        ic(x.shape)
         for layer in self.head:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
@@ -871,24 +714,114 @@ class Encoder3d(nn.Module):
                 x = layer(x, feat_cache[idx])
                 feat_cache[idx] = cache_x
                 feat_idx[0] += 1
-                ic(x.shape, feat_cache[idx].shape, feat_idx[0])
             else:
                 x = layer(x)
-        ic(x.shape)
         return x
 
-
-
-
 class Decoder3d(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        dim: int = 128,
+        z_dim: int = 4,
+        dim_mult: List[int] = [1, 2, 4, 4],
+        num_res_blocks: int = 2,
+        attn_scales: List = [],
+        temporal_upsample: List[bool] = [False, True, True],
+        dropout: float = 0.0
+    ):
         super().__init__()
-        pass
+        self.dim = dim
+        self.z_dim = z_dim
+        self.dim_mult = dim_mult
+        self.num_res_blocks = num_res_blocks
+        self.attn_scales = attn_scales
+        self.temporal_upsample = temporal_upsample
 
-    def forward(self,):
-        pass
+        dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
+        self.dims=dims
+        scale = 1.0 / 2 ** (len(dim_mult) - 2)
 
+        self.conv1 = CausalConv3d(
+            in_channels=z_dim,
+            out_channels=dims[0],
+            kernel_size=3,
+            padding=1
+        )
 
+        self.middle = nn.Sequential(
+            ResidualBlock(
+                in_dim=dims[0],
+                out_dim=dims[0],
+                dropout=dropout
+            ),
+            AttentionBlock(dim=dims[0]),
+            ResidualBlock(
+                in_dim=dims[0],
+                out_dim=dims[0],
+                dropout=dropout
+            )
+        )
+
+        upsamples = []
+        for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
+            t_up_flag = temporal_upsample[i] if i < len(temporal_upsample) else False
+            upsamples.append(
+                Up_ResidualBlock(
+                    in_dim=in_dim,
+                    out_dim=out_dim,
+                    dropout=dropout,
+                    mult=num_res_blocks + 1,
+                    temporal_upsample=t_up_flag,
+                    up_flag=i != len(dim_mult) - 1
+                )
+            )
+        self.upsamples = nn.Sequential(*upsamples)
+
+        self.head = nn.Sequential(
+            RMS_norm(dim=out_dim, images=False), 
+            nn.SiLU(),
+            CausalConv3d(
+                in_channels=out_dim,
+                out_channels=12,
+                kernel_size=3,
+                padding=1
+            )
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        feat_cache = None,
+        feat_idx = [0],
+        first_chunk: bool = False
+    ) -> torch.Tensor:
+        any_not_none = any([c is not None for c in feat_cache])
+        if feat_cache is not None and any_not_none:
+            idx = feat_idx[0]
+            cache_x = x[:, :, -CACHE_T:, :, :].clone()            
+            raise NotImplementedError("0")
+        else: 
+            x = self.conv1(x)
+
+        for i, layer in enumerate(self.middle):
+            if feat_cache is not None and any_not_none:
+                raise NotImplementedError("1")
+            else:
+                x = layer(x)
+        for i, layer in enumerate(self.upsamples):
+            if feat_cache is not None and any_not_none :
+                raise NotImplementedError("2")
+            else:
+                x = layer(x)
+        for i, layer in enumerate(self.head):
+            if isinstance(layer, CausalConv3d) and feat_cache is not None and any_not_none:
+                raise NotImplementedError("3")
+            else:
+                x_before = x.clone()
+                x = layer(x)
+                
+        return x
+        
 class WanVAE_(nn.Module):
     def __init__(
         self,
@@ -931,15 +864,15 @@ class WanVAE_(nn.Module):
             out_channels=z_dim, 
             kernel_size=1
         )
-        # self.decoder = Decoder3d(
-        #     dim=dec_dim,
-        #     z_dim=z_dim,
-        #     dim_mult=dim_mult,
-        #     num_res_blocks=num_res_blocks,
-        #     attn_scales=attn_scales,
-        #     temporal_upsample=self.temporal_upsample,
-        #     dropout=dropout,
-        # )
+        self.decoder = Decoder3d(
+            dim=dec_dim,
+            z_dim=z_dim,
+            dim_mult=dim_mult,
+            num_res_blocks=num_res_blocks,
+            attn_scales=attn_scales,
+            temporal_upsample=self.temporal_upsample,
+            dropout=dropout,
+        )
     
     def forward(
         self,
@@ -955,18 +888,13 @@ class WanVAE_(nn.Module):
         x: torch.Tensor,
         scale: List[float] = [0., 1.],
     ) -> torch.Tensor:
-        self.clear_cache() # TODO
-        ic(x.shape)
+        self.clear_cache()
         x = patchify(x, patch_size=2)
-        ic(x.shape)
         t = x.shape[2]
         iter_  = 1 + (t - 1) // 4
-        ic(iter_)
         for i in range(iter_):
             self._enc_conv_idx = [0]
             if i == 0: 
-                ic("First frame")
-                ic(x[:,:,:1,:,:].shape)
                 out = self.encoder(
                     x[:, :, :1, :, :],
                     feat_cache=self._enc_feat_map,
@@ -986,15 +914,46 @@ class WanVAE_(nn.Module):
             mu = (mu - scale[0]) * scale[1]
         self.clear_cache()
         return mu 
-
-        
+    
+    def decode(
+        self,
+        z: torch.Tensor,
+        scale: List[float] = [0., 1.],
+    ) -> torch.Tensor:
+        self.clear_cache()
+        # Debug: Check latent before scale denormalization
+        if isinstance(scale[0], torch.Tensor):
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(1, self.z_dim, 1, 1, 1)
+        else:
+            z = z / scale[1] + scale[0]
+        # Debug: Check latent after scale denormalization
+        iter_ = z.shape[2]
+        x = self.conv2(z)
+        for i in range(iter_):
+            self._conv_idx = [0]
+            if i == 0:
+                out = self.decoder(
+                    x[:, :, i:i+1, :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx,
+                    first_chunk=True,
+                )
+            else:
+                out_ = self.decoder(
+                    x[:, :, i:i+1, :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx
+                )
+                out = torch.cat([out, out_], dim=2)
+        out = unpatchify(out, patch_size=2)
+        self.clear_cache()
+        return out
     
     def clear_cache(self):
-        # TODO
         # This method gets called before each encode/decode call
-        # self._conv_num = count_conv3d(self.decoder)
-        # self._conv_idx = [0]
-        # self._feat_map = [None] * self._conv_num
+        self._conv_num = count_conv3d(self.decoder)
+        self._conv_idx = [0]
+        self._feat_map = [None] * self._conv_num
         # cache encode
         self._enc_conv_num = count_conv3d(self.encoder)
         self._enc_conv_idx = [0]
@@ -1013,15 +972,6 @@ def _video_vae(
     num_res_blocks: int = 2,
     dropout: float = 0.0,
 ):
-    # cfg = dict(
-    #     dim=dim,
-    #     z_dim=z_dim,
-    #     dim_mult=dim_mult,
-    #     temporal_downsample=temporal_downsample,
-    #     attn_scales=attn_scales,
-    #     num_res_blocks=num_res_blocks,
-    #     dropout=dropout,
-    # )
     # init the model using meta device
     with torch.device("meta"):
         model = WanVAE_(
@@ -1062,7 +1012,7 @@ class Wan2_2_VAE:
                 -0.2246, -0.1207, -0.0698,  0.5109,  0.2665, -0.2108, -0.2158,  0.2502, 
                 -0.2055, -0.0322,  0.1109,  0.1567, -0.0729,  0.0899, -0.2799, -0.1230, 
                 -0.0313, -0.1649,  0.0117,  0.0723, -0.2839, -0.2083, -0.0520,  0.3748,
-                0.0152,  0.1957,  0.1433, -0.2944,  0.3573, -0.0548, -0.1681, -0.0667,
+                 0.0152,  0.1957,  0.1433, -0.2944,  0.3573, -0.0548, -0.1681, -0.0667,
             ],
             device=self.device,
             dtype=self.dtype
@@ -1094,7 +1044,6 @@ class Wan2_2_VAE:
     
     # Original implementation
     def encode(self, videos: List[torch.Tensor]) -> List[torch.Tensor]:
-        ic(len(videos))
         try: 
             if not isinstance(videos, list):
                 raise TypeError("videos should be a list")
@@ -1111,20 +1060,20 @@ class Wan2_2_VAE:
         try:
             if not isinstance(zs, list):
                 raise TypeError("zs shoulf be a list")
+            # Match reference implementation: use amp.autocast(dtype=self.dtype) without device specification
             with amp.autocast('cuda', dtype=self.dtype):
-                return [
-                    self.model.decode(
-                        u.unsqueeze(0), self.scale
-                    ).float().clamp_(-1., 1.).squeeze(0)
-                    for u in zs
-                ]
+                results = []
+                for u in zs:
+                    decoded = self.model.decode(u.unsqueeze(0), self.scale).float().clamp_(-1., 1.)
+                    results.append(decoded.squeeze(0))
+                return results
         except TypeError as e:
             logger.error(e)
             return None
 
 if __name__ == "__main__":
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    dtype_ = torch.bfloat16
+    dtype_ = torch.float32
     vae = Wan2_2_VAE(
         vae_pth="assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
         dtype=torch.bfloat16, device=device
@@ -1138,23 +1087,137 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset=dataset, batch_size=1)
     batch = next(iter(dataloader))
     video = batch[0].permute(0, 4, 1, 2, 3)
-    ic(video.shape)
-    ic(video.dtype)
-    ic(video.device)
-    ic(video.min(), video.max())
+
     video = ((video / 255.0) * 2.) - 1.  
     video = video.to(device=device, dtype=dtype_)
-    ic(video.min(), video.max()) 
-    # ic(batch[0].permute(0,1,4,2,3).shape)
+    # print(batch[0].permute(0,1,4,2,3).shape)
+    print(video[:, :, 0:1, :, :].shape)
+    # video = video[:, :, 0:1, :, :]
+
     # exit()
 
     img = torch.rand((1, 3, 77, 512, 512)).to(device=device, dtype=torch.bfloat16)
-    ic(vae)
-    ic(img.shape)
-    ic(video.shape)
-    latent = vae.encode(list(video))
-    ic(latent[0].shape)
-    assert latent[0].shape == torch.Size((48, 20, 32, 32))
-
+    print(vae)
+    print(img.shape)
+    # print(video[:, :, 0:1, :, :].shape)
     
-    # ic(latent.shape)
+    # Debug: Check input video stats before encoding
+    print(f"Input video - video.shape: {video.shape}")
+    print(f"Input video - video.dtype: {video.dtype}")
+    print(f"Input video - video.min: {video.min().item():.4f}, max: {video.max().item():.4f}")
+    print(f"Input video - video.mean: {video.mean().item():.4f}")
+    
+    latent = vae.encode(list(video))
+    
+    print(f"latent[0].shape {latent[0].shape}")
+    
+    # Debug: Check latent statistics
+    print(f"Latent - latent[0].shape: {latent[0].shape}")
+    print(f"Latent - latent[0].dtype: {latent[0].dtype}")
+    print(f"Latent - latent[0].min: {latent[0].min().item():.4f}, max: {latent[0].max().item():.4f}")
+    print(f"Latent - latent[0].mean: {latent[0].mean().item():.4f}, std: {latent[0].std().item():.4f}")
+    
+    t = (video.shape[2] - 1) // 4 + 1
+
+    assert latent[0].shape == torch.Size((48, t, 32, 32))
+
+    reconstructed_video = vae.decode(list(latent))
+    print(f"reconstructed_video.shape {reconstructed_video[0].shape}")
+    print(f"video.shape {video.shape}")
+    assert reconstructed_video[0].shape == video.shape
+    print(f"reconstructed_video.shape {reconstructed_video[0].shape}")
+    # Removed exit() to allow video saving code to run
+    
+    # Compute PSNR between original and reconstructed video
+    # Original video: (1, 3, 1, 512, 512) - (B, C, T, H, W)
+    # Reconstructed video: (3, 1, 512, 512) - (C, T, H, W), need to add batch dimension
+    original_video = video  # (1, 3, 1, 512, 512)
+    reconstructed_video_tensor = reconstructed_video[0].unsqueeze(0)  # (1, 3, 1, 512, 512)
+    print(f"reconstructed_video.shape {reconstructed_video[0].shape}")
+    # Ensure both are on same device and dtype
+    original_video_float = original_video.float()
+    reconstructed_video_float = reconstructed_video_tensor.float()
+    print(reconstructed_video_float.shape)
+    # Compute PSNR using [-1, 1] range (data_range = 2.0)
+    # PSNR is computed per frame, then averaged
+    psnr_values = []
+    print(original_video_float.shape)
+    for t in range(original_video_float.shape[2] - 1):  # For each temporal frame
+        print(t)
+        original_frame = original_video_float[:, :, t, :, :]  # (1, 3, 512, 512)
+        reconstructed_frame = reconstructed_video_float[:, :, t, :, :]  # (1, 3, 512, 512)
+        
+        # Compute PSNR for this frame
+        psnr_frame = peak_signal_noise_ratio(
+            preds=reconstructed_frame,
+            target=original_frame,
+            data_range=2.0  # Range for [-1, 1] normalized data
+        )
+        psnr_values.append(psnr_frame.item())
+        print(f"Frame {t} PSNR: {psnr_frame.item():.4f} dB")
+    
+    # Compute average PSNR
+    avg_psnr = sum(psnr_values) / len(psnr_values) if psnr_values else 0.0
+    print(f"\n{'='*60}")
+    print(f"Average PSNR: {avg_psnr:.4f} dB")
+    print(f"PSNR per frame: {[f'{p:.2f}' for p in psnr_values]}")
+    print(f"{'='*60}\n")
+    
+    # Save reconstructed video using torchvision
+    # reconstructed_video is a list with one element: [(C, T, H, W)]
+    video_tensor = reconstructed_video[0]  # Get the first (and only) video: (C, T, H, W)
+    
+    # Debug: Check values before conversion
+    print(f"Before conversion - video_tensor.shape: {video_tensor.shape}")
+    print(f"Before conversion - video_tensor.dtype: {video_tensor.dtype}")
+    print(f"Before conversion - video_tensor.min: {video_tensor.min().item():.4f}, max: {video_tensor.max().item():.4f}")
+    print(f"Before conversion - video_tensor.mean: {video_tensor.mean().item():.4f}")
+    
+    # Clamp values to [-1, 1] range (should already be clamped, but ensure it)
+    print(f"video_tensor.min/max {video_tensor.min()} {video_tensor.max()}")
+    video_tensor = video_tensor.clamp(-1, 1)
+    
+    # Check if the output range is too narrow (indicates model issue)
+    # If the range is very narrow, normalize to use full dynamic range for visualization
+    actual_min = video_tensor.min().item()
+    actual_max = video_tensor.max().item()
+    actual_range = actual_max - actual_min
+    
+    # If the range is less than 0.5, the model output is too narrow
+    # Normalize to use full [-1, 1] range for better visualization
+    if actual_range < 0.5:
+        print(f"WARNING: Decoder output range is narrow ({actual_range:.4f}). Normalizing to full range for visualization.")
+        print(f"  This may indicate a model issue. Original range: [{actual_min:.4f}, {actual_max:.4f}]")
+        # Normalize to [-1, 1] range first
+        if actual_range > 0:
+            video_tensor = (video_tensor - actual_min) / actual_range * 2.0 - 1.0
+        else:
+            # If range is 0, set to middle value
+            video_tensor = torch.zeros_like(video_tensor)
+    
+    # Convert from [-1, 1] to [0, 255] uint8
+    # Formula: (video + 1.0) * 127.5 maps [-1, 1] to [0, 255]
+    video_tensor = (video_tensor + 1.0) / 2. * 255.
+    
+    video_tensor = video_tensor.clamp(0, 255).to(dtype=torch.uint8)
+    
+    print(f"After conversion - video_tensor.shape: {video_tensor.shape}")
+    print(f"After conversion - video_tensor.dtype: {video_tensor.dtype}")
+    print(f"After conversion - video_tensor.min: {video_tensor.min().item()}, max: {video_tensor.max().item()}")
+    
+    # Rearrange from [C, T, H, W] to [T, H, W, C] for torchvision.write_video
+    video_tensor = rearrange(video_tensor, "c t h w -> t h w c")
+    print(f"After rearrange - video_tensor.shape: {video_tensor.shape}")
+    
+    # Move to CPU and convert to numpy array
+    video_np = video_tensor.cpu().numpy()
+    print(f"Video numpy shape: {video_np.shape}, dtype: {video_np.dtype}")
+    print(f"Video numpy min: {video_np.min()}, max: {video_np.max()}")
+    
+    # Save video using torchvision
+    output_path = "reconstructed_video.mp4"
+    fps = 8.0  # Frames per second (adjust as needed)
+    torchvision.io.write_video(output_path, video_np, fps=fps, video_codec="libx264")
+    print(f"✓ Video saved successfully: {output_path}")
+    
+    # print(latent.shape)
