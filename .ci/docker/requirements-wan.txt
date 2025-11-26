@@ -3,4 +3,5 @@ einops
 sentencepiece
 pillow
 torchvision
+torchmetrics
 decord2>=2.0.0
