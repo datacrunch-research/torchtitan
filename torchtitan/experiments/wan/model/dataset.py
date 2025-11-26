@@ -69,6 +69,8 @@ class RawVideoDataset(Dataset):
         elif self.downsampled == 2:
             self.frame_idxs = [round(i * (77 - 1) / (41 - 1)) for i in range(41)]
             # print(f"frame_idxs: {self.frame_idxs}")
+        elif self.downsampled == 1:
+            self.frame_idxs = list(range(clip_length))
         self.num_frames_per_shard = {}
 
         self.clip_start_idxs = []  # (shard_idx, frame_id)

@@ -23,11 +23,9 @@ def preprocess_data(
     *,
     # arguments from the config
     wan_video_vae: WanVideoVAE,
-    clip_encoder: WanEmbedder,
-    t5_encoder: WanEmbedder,
+    t5_encoder: Optional[WanEmbedder] = None,
     batch: dict[str, Tensor],
     precomputed_t5_embedding: Optional[Tensor] = None,
-    precomputed_clip_embedding: Optional[Tensor] = None,
 ) -> dict[str, Tensor]:
     """
     Take a batch of inputs and encoder as input and return a batch of preprocessed data.
@@ -35,61 +33,81 @@ def preprocess_data(
     Args:
         device (torch.device): device to do preprocessing on
         dtype (torch.dtype): data type to do preprocessing in
-        autoencoer(AutoEncoder): autoencoder to use for preprocessing
-        clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
+        wan_video_vae (WanVideoVAE): Video VAE to use for preprocessing
         t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
         batch (dict[str, Tensor]): batch of data to preprocess. Tensor shape: [bsz, ...]
         precomputed_t5_embedding (Optional[Tensor]): Precomputed T5 embedding for empty string [seq_len, hidden_dim]
-        precomputed_clip_embedding (Optional[Tensor]): Precomputed CLIP embedding for empty string [seq_len, hidden_dim]
 
     Returns:
         dict[str, Tensor]: batch of preprocessed data
     """
 
-    clip_tokens = batch["clip_tokens"].squeeze(1).to(device=device, dtype=torch.int)
     t5_tokens = batch["t5_tokens"].squeeze(1).to(device=device, dtype=torch.int)
 
     # Check if we can use precomputed embeddings (when all tokens are empty strings)
-    # This allows T5 and CLIP encoders to be offloaded since we only encode ""
-    bsz = clip_tokens.shape[0]
+    # This allows T5 encoder to be offloaded since we only encode ""
+    bsz = t5_tokens.shape[0]
     
     # Use precomputed embeddings if available and token sequence lengths match
     # For the 1x-wmds dataset, we always use empty strings, so this optimization applies
-    if precomputed_t5_embedding is not None and precomputed_clip_embedding is not None:
+    # T5 uses precomputed empty string ("") embeddings to avoid encoder forward passes
+    if precomputed_t5_embedding is not None:
         # Check if token sequence lengths match precomputed embeddings
         # If they match, we can use precomputed embeddings (saves encoder forward passes)
         t5_seq_len_match = t5_tokens.shape[1] == precomputed_t5_embedding.shape[0]
-        clip_seq_len_match = clip_tokens.shape[1] == precomputed_clip_embedding.shape[0]
         
         if t5_seq_len_match:
+            # Use precomputed T5 embedding for empty string ("")
             # Expand precomputed T5 embedding to batch size: [seq_len, hidden_dim] -> [bsz, seq_len, hidden_dim]
+            logger.debug(f"Using precomputed T5 embedding (empty string) for batch size {bsz}")
             t5_text_encodings = precomputed_t5_embedding.unsqueeze(0).expand(bsz, -1, -1).to(device=device, dtype=dtype)
         else:
-            # Sequence length doesn't match, compute normally
+            # Sequence length doesn't match, need encoder to compute
+            if t5_encoder is None:
+                raise RuntimeError(
+                    "T5 encoder is required but was deleted. Sequence length mismatch: "
+                    f"tokens have {t5_tokens.shape[1]} tokens but precomputed embedding has "
+                    f"{precomputed_t5_embedding.shape[0]} tokens."
+                )
+            logger.debug("T5 sequence length mismatch, computing embeddings with encoder")
             t5_text_encodings = t5_encoder(t5_tokens)
-        
-        if clip_seq_len_match:
-            # Expand precomputed CLIP embedding to batch size: [seq_len, hidden_dim] -> [bsz, seq_len, hidden_dim]
-            clip_text_encodings = precomputed_clip_embedding.unsqueeze(0).expand(bsz, -1, -1).to(device=device, dtype=dtype)
-        else:
-            # Sequence length doesn't match, compute normally
-            clip_text_encodings = clip_encoder(clip_tokens)
     else:
-        # No precomputed embeddings available, compute normally
-        clip_text_encodings = clip_encoder(clip_tokens)
+        # No precomputed embeddings available, need encoder to compute
+        if t5_encoder is None:
+            raise RuntimeError(
+                "T5 encoder is required but was deleted. Precomputed embeddings are not available."
+            )
         t5_text_encodings = t5_encoder(t5_tokens)
 
-    # Move videos to device and convert to proper dtype
+    # Move videos to GPU first, then convert dtype on GPU
     # Videos come from dataloader as (batch_size, num_frames, height, width, channels)
-    videos = batch["video_frames"].to(device=device, dtype=dtype)
+    # Original dtype is typically uint8 (from numpy/decord), converting to target dtype (bfloat16) on GPU
+    video_frames_input = batch["video_frames"]
+    # logger.info(
+    #     f"Video processing: {video_frames_input.dtype} -> {dtype}, "
+    #     f"shape: {video_frames_input.shape}, device: {video_frames_input.device} -> {device}"
+    # )
+    
+    # First move to GPU (keeping original dtype to minimize CPU-GPU transfer)
+    # Then convert dtype on GPU for better performance
+    videos = batch["video_frames"].to(device=device)
+    # logger.info(f"  - Moved to {device}, dtype: {videos.dtype}")
+    
+    # Convert dtype on GPU (more efficient than converting on CPU then moving)
+    videos = videos.to(dtype=dtype)
+    # logger.info(f"  ✓ Converted to {dtype} on {device}, shape: {videos.shape}")
     
     # Permute from (B, T, H, W, C) to (B, T, C, H, W)
     videos = videos.permute(0, 1, 4, 2, 3)
+    # logger.info(f"  - Permuted to (B, T, C, H, W): {videos.shape}")
+    
     # Normalize video frames from [0, 255] range to [-1, 1] range
     # This is required because the VAE expects input in [-1, 1] range
+    # logger.info("  - Normalizing video frames from [0, 255] to [-1, 1] range...")
     max_value = 1.0
     min_value = -1.0
     videos = videos * ((max_value - min_value) / 255.0) + min_value
+    # logger.info(f"  ✓ Normalized, value range: [{videos.min().item():.3f}, {videos.max().item():.3f}]")
     # Transpose from (B, T, C, H, W) to (B, C, T, H, W) for VAE encoding
     # The VAE encode method expects a batched tensor of shape (B, C, T, H, W)
     videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
@@ -101,10 +119,9 @@ def preprocess_data(
         device=device,
         tiled=False,
     )
+    logger.info(f"Video latents shape: {video_latents.shape}")
     batch["latents"] = video_latents.to(device=device, dtype=dtype)
 
-
-    batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
 
     return batch
@@ -116,7 +133,8 @@ def generate_noise_latent(
     width: int,
     device: str | torch.device,
     dtype: torch.dtype,
-    seed: int | None = None,
+    temporal_dim: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> Tensor:
     """Generate noise latents for the Flux flow model. The random seed will be set at the beginning of training.
 
@@ -132,10 +150,13 @@ def generate_noise_latent(
             Shape: [num_samples, LATENT_CHANNELS, height // IMG_LATENT_SIZE_RATIO, width // IMG_LATENT_SIZE_RATIO]
 
     """
-    LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 16, 8
+    # this are specific to the Wan2.2-VAE model
+    LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 48, 16
+    TEMPORAL_DIM = temporal_dim if temporal_dim is not None else 6
     return torch.randn(
         bsz,
         LATENT_CHANNELS,
+        TEMPORAL_DIM,
         height // IMAGE_LATENT_SIZE_RATIO,
         width // IMAGE_LATENT_SIZE_RATIO,
         dtype=dtype,
@@ -193,6 +214,7 @@ def pack_latents(x: Tensor) -> Tensor:
             Shape: (bsz, (temporal * latent_height // 2 * latent_width // 2), channels * 4)
     """
     PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+    logger.info(f"Packing latents: {x.shape}")
     b, c, t, h, w = x.shape
     h_patches = h // PATCH_HEIGHT
     w_patches = w // PATCH_WIDTH

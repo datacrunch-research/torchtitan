@@ -10,7 +10,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.experiments.wan.inference.sampling import generate_image, save_image
+from torchtitan.experiments.wan.inference.sampling import generate_video, save_image
 from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
 from torchtitan.experiments.wan.train import WanTrainer
 from torchtitan.tools.logging import init_logger, logger
@@ -51,7 +51,7 @@ def inference(config: JobConfig):
         global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
-            images = generate_image(
+            images = generate_video(
                 device=trainer.device,
                 dtype=trainer._dtype,
                 job_config=trainer.job_config,
