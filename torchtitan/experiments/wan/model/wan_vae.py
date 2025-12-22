@@ -1,4 +1,4 @@
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import logger, init_logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -360,49 +360,22 @@ class Resample38(Resample):
         x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
         
         # Handle temporal downsampling for downsample3d mode (after spatial resampling)
+        # Match the correct behavior from original_vae2_2.py
         if self.mode == "downsample3d":
             if feat_cache is not None:
                 idx = feat_idx[0]
                 if feat_cache[idx] is None:
-                    # First time: apply temporal compression and cache the result
-                    # Pad temporal dimension to be divisible by stride and at least kernel_size
-                    t_curr = x.shape[2]
-                    kernel_t = self.time_conv.kernel_size[0]  # Get kernel size from time_conv
-                    # Pad to be divisible by stride (2) and at least kernel_size
-                    pad_t = max((2 - t_curr % 2) % 2, max(0, kernel_t - t_curr))
-                    if pad_t > 0:
-                        x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
-                    # Apply temporal convolution with stride 2
-                    x = self.time_conv(x)
-                    # Cache the last frame for next chunk
-                    feat_cache[idx] = x[:, :, -1:, :, :].clone()
+                    # First chunk: cache the input before temporal conv, do NOT apply temporal conv
+                    # This matches the correct behavior in original_vae2_2.py
+                    feat_cache[idx] = x.clone()
                     feat_idx[0] += 1
                 else:
-                    # Subsequent times: concatenate with cached frame and apply compression
+                    # Subsequent chunks: concatenate cached frame with current input, then apply temporal conv
                     cache_x = x[:, :, -1:, :, :].clone()
-                    cached_frame = feat_cache[idx][:, :, -1:, :, :]
-                    x_concat = torch.cat([cached_frame, x], 2)
-                    # Ensure we have enough frames for the kernel
-                    kernel_t = self.time_conv.kernel_size[0]
-                    t_concat = x_concat.shape[2]
-                    if t_concat < kernel_t:
-                        # Pad if needed
-                        pad_t = kernel_t - t_concat
-                        x_concat = F.pad(x_concat, (0, 0, 0, 0, 0, pad_t))
-                    x = self.time_conv(x_concat)
+                    x = self.time_conv(
+                        torch.cat([feat_cache[idx][:, :, -1:, :, :], x], 2))
                     feat_cache[idx] = cache_x
                     feat_idx[0] += 1
-            else:
-                # When feat_cache is None, still apply temporal downsampling
-                # Pad temporal dimension to be divisible by stride and at least kernel_size
-                t_curr = x.shape[2]
-                kernel_t = self.time_conv.kernel_size[0]  # Get kernel size from time_conv
-                # Pad to be divisible by stride (2) and at least kernel_size
-                pad_t = max((2 - t_curr % 2) % 2, max(0, kernel_t - t_curr))
-                if pad_t > 0:
-                    x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
-                # Apply temporal convolution with stride 2
-                x = self.time_conv(x)
         
         return x
 
@@ -624,21 +597,10 @@ class Down_ResidualBlock(nn.Module):
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         x_copy = x.clone()
-        
-        # Process through downsample modules
-        for i, module in enumerate(self.downsamples):
+        for module in self.downsamples:
             x = module(x, feat_cache, feat_idx)
 
-        # Compute shortcut path
-        x_shortcut = self.avg_shortcut(x_copy)
-        
-        # Handle temporal dimension mismatch: if shapes don't match, interpolate shortcut
-        if x.shape[2] != x_shortcut.shape[2]:
-            # Interpolate shortcut to match main path's temporal dimension
-            x_shortcut = torch.nn.functional.interpolate(
-                x_shortcut, size=(x.shape[2], x.shape[3], x.shape[4]), mode='trilinear', align_corners=False
-            )
-        return x + x_shortcut
+        return x + self.avg_shortcut(x_copy)
 
 
 class Up_ResidualBlock(nn.Module):
@@ -2085,16 +2047,17 @@ def load_wan_vae(
     return vae.to(dtype=dtype)
 
 def main():
+    init_logger()
     logger.info("Starting main function")
     params_38 = WanVAEParams(vae_type="38", z_dim=48)
     logger.info("Loading WanVideoVAE38")
-    vae_38 = load_wan_vae("/root/torchtitan/Wan2.2-TI2V-5B/Wan2.2_VAE.pth", params_38, device="cuda")
+    vae_38 = load_wan_vae("./assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth", params_38, device="cuda")
     logger.info("WanVideoVAE38 loaded")
 
     from torch.utils.data import DataLoader
     dataset = RawVideoDataset(
-        data_dir="/root/dataset/world_model_raw_data/train_v2.0_raw/",
-        downsampled=4,
+        data_dir="../dataset/world_model_raw_data/train_v2.0_raw/",
+        downsampled=1,
         window_size=4,
         robot_temporal_mode="downsampled"
     )
@@ -2184,7 +2147,7 @@ def main():
         logger.info(f"Input video mean: {input_video_float.mean().item():.4f}, std: {input_video_float.std().item():.4f}")
         logger.info(f"Pred video mean: {pred_video_float.mean().item():.4f}, std: {pred_video_float.std().item():.4f}")
         
-        break
+        # break
     # # Test loading standard WanVideoVAE
     # params_std = WanVAEParams(vae_type="standard", z_dim=16)
     # vae_std = load_wan_vae("path/to/checkpoint.safetensors", params_std, device="cuda")

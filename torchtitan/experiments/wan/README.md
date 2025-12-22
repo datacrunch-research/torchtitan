@@ -8,6 +8,16 @@
 This directory contains the implementation of Wan2.2 TI2V-5B model in torchtitan. In torchtitan, we showcase the pre-training of the model. The Wan2.2 TI2V-5B model is a transformer-based video generation model that uses flow matching for training.
 
 ## Prerequisites
+
+Create an `uv` venv by running:
+```bash
+cd path/to/torchtitan
+uv venv --python 3.12
+uv pip install -r requirements.txt
+uv pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
+cd torchtitn
+```
+
 Install the required dependencies:
 ```bash
 pip install -r requirements-wan.txt
@@ -18,6 +28,9 @@ Download the Wan2.2 TI2V-5B weights from HF:
 ```bash
 python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-TI2V-5B --all --hf_token <your_access_token>
 ```
+
+Download the datasets:
+
 
 ## Usage
 Run the following command to train the model:
@@ -32,7 +45,7 @@ CONFIG_FILE="./torchtitan/experiments/wan/train_configs/wan_1xwm.toml" ./torchti
 
 
 ## Supported Features
-- Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.
+- Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.c
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
