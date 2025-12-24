@@ -2057,6 +2057,9 @@ def load_wan_vae(
 
 
 def main():
+    from torch.utils.data import DataLoader
+    from icecream import ic 
+
     init_logger()
     logger.info("Starting main function")
     params_38 = WanVAEParams(vae_type="38", z_dim=48)
@@ -2066,8 +2069,6 @@ def main():
     )
     logger.info("WanVideoVAE38 loaded")
 
-    from torch.utils.data import DataLoader
-
     dataset = RawVideoDataset(
         data_dir="../dataset/world_model_raw_data/train_v2.0_raw/",
         downsampled=1,
@@ -2076,19 +2077,26 @@ def main():
     )
     dataloader = DataLoader(
         dataset,
-        shuffle=True,
+        shuffle=False,
         batch_size=4,
         drop_last=True,
+        num_workers=1
     )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    n_batches = 1
 
-    for batch in dataloader:
+    for i, batch in enumerate(dataloader):
+        if n_batches == i: 
+            break
         input_video, robot_states = batch
         input_video = input_video.to(device, dtype=torch.bfloat16)
         robot_states = robot_states.to(device, dtype=torch.bfloat16)
+        ic(input_video.shape)
+        ic(robot_states.shape)
 
         input_video = input_video.permute(0, 1, 4, 2, 3)
+        ic("after permute", input_video.shape)
 
         # Normalize video frames between -1 and 1 (from [0, 255] range)
         # This is required because the VAE expects input in [-1, 1] range
@@ -2142,7 +2150,6 @@ def main():
             # Transpose to get (B, T)
             if psnr_values.dim() == 2:
                 psnr_values = psnr_values.transpose(0, 1)  # (B, T)
-            logger.info(f"After transpose shape: {psnr_values.shape}")
 
         # psnr_values shape: (B, T) - PSNR for each batch and frame
         logger.info(f"PSNR shape: {psnr_values.shape}")
@@ -2154,16 +2161,16 @@ def main():
 
         # Debug: Check input/output ranges to verify normalization
         logger.info(
-            f"Input video range: [{input_video_float.min().item():.4f}, {input_video_float.max().item():.4f}]"
+            f"Input video range:\t [{input_video_float.min().item():.4f}, {input_video_float.max().item():.4f}]"
         )
         logger.info(
-            f"Pred video range: [{pred_video_float.min().item():.4f}, {pred_video_float.max().item():.4f}]"
+            f"Pred video range:\t [{pred_video_float.min().item():.4f}, {pred_video_float.max().item():.4f}]"
         )
         logger.info(
-            f"Input video mean: {input_video_float.mean().item():.4f}, std: {input_video_float.std().item():.4f}"
+            f"Input video mean:\t {input_video_float.mean().item():.4f}, std: {input_video_float.std().item():.4f}"
         )
         logger.info(
-            f"Pred video mean: {pred_video_float.mean().item():.4f}, std: {pred_video_float.std().item():.4f}"
+            f"Pred video mean:\t {pred_video_float.mean().item():.4f}, std: {pred_video_float.std().item():.4f}"
         )
 
         # break

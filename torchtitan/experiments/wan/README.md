@@ -15,7 +15,7 @@ cd path/to/torchtitan
 uv venv --python 3.12
 uv pip install -r requirements.txt
 uv pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
-cd torchtitn
+cd torchtitan
 ```
 
 Install the required dependencies:
@@ -45,7 +45,7 @@ CONFIG_FILE="./torchtitan/experiments/wan/train_configs/wan_1xwm.toml" ./torchti
 
 
 ## Supported Features
-- Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.c
+- Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
