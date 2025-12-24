@@ -48,14 +48,14 @@ img_size = 256
 num_workers = 8  # Number of worker processes for data loading (0 = main process only)
 persistent_workers = true  # Keep workers alive across epochs (requires num_workers > 0)
 pin_memory = true  # Pin memory for faster GPU transfer (recommended when using GPU)
-prefetch_factor = 2  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
+prefetch_factor = 1  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 256
 autoencoder_path = "assets/hf/FLUX.1-dev/ae.safetensors"  # Autoencoder to use for image
-wan_vae_path = "Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+wan_vae_path = "assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
 
 [parallelism]
 data_parallel_replicate_degree = 1

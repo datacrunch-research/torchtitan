@@ -97,6 +97,13 @@ def get_peak_flops(device_name: str) -> int:
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
         return 2.25e15
+    elif "GB300" in device_name:
+        # TODO: double check this
+        # GB300 is part of NVIDIA's Blackwell architecture (same generation as B200)
+        # GB300 has 276GB memory and similar compute capabilities to B200
+        # Using B200's peak FLOPS as reference for Blackwell architecture
+        # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+        return 2.25e15
     elif "MI355X" in device_name:
         # MI355X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
         return 2500e12

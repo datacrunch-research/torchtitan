@@ -64,6 +64,10 @@ class Encoder:
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     wan_vae_path: str = "Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
     """Wan Video VAE checkpoint path to load. This should be a local path referring to a .pth or .safetensors file."""
+    pretrained_weights_path: str | None = None
+    """Path to directory containing pretrained model weights in HuggingFace safetensors format.
+    If None, will attempt to load from default path: assets/hf/Wan2.2-TI2V-5B
+    Set to empty string "" to disable pretrained weight loading."""
     max_t5_encoding_len: int = 256
     """Maximum length of the T5 encoding."""
 
@@ -85,7 +89,8 @@ class Validation:
     """Directory to save image generated/sampled from the model"""
     all_timesteps: bool = False
     """Whether to generate all stratified timesteps per sample or use round robin"""
-
+    num_cond_frames: int = 5
+    """Number of frames to condition on"""
 
 @dataclass
 class Inference:
