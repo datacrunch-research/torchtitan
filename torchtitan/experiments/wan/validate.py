@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Generator
+from typing import Generator, Optional
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -19,7 +20,7 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.wan.wan_datasets import build_wan_validation_dataloader
-from torchtitan.experiments.wan.inference.sampling import generate_image, save_image
+from torchtitan.experiments.wan.inference.sampling import generate_video, save_video
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 
 from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
@@ -75,7 +76,14 @@ class WanValidator(Validator):
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
-        self.t5_tokenizer, self.clip_tokenizer = build_wan_tokenizer(self.job_config)
+        
+        self.t5_tokenizer = build_wan_tokenizer(self.job_config)
+        self.precomputed_t5_embedding = None
+        # with torch.no_grad():
+        #     empty_t5_tokens_tensor = self.t5_tokenizer.encode("").to(device=self.device)
+        #     self._precomputed_t5_embedding = self.t5_encoder(empty_t5_tokens_tensor).to(dtype=self._dtype)
+        #     self._precomputed_t5_embedding = self._precomputed_t5_embedding.squeeze(0)  # [seq_len, hidden_dim]
+
 
         if self.job_config.validation.steps == -1:
             logger.warning(
@@ -88,14 +96,14 @@ class WanValidator(Validator):
         device: torch.device,
         _dtype: torch.dtype,
         wan_video_vae: WanVideoVAE,
-        t5_encoder: WanEmbedder,
-        clip_encoder: WanEmbedder,
+        t5_encoder: Optional[WanEmbedder] = None,
+        precomputed_t5_embedding: Optional[Tensor] = None,
     ):
         self.device = device
         self._dtype = _dtype
         self.wan_video_vae = wan_video_vae
         self.t5_encoder = t5_encoder
-        self.clip_encoder = clip_encoder
+        self.precomputed_t5_embedding = precomputed_t5_embedding
 
     @torch.no_grad()
     def validate(
@@ -133,47 +141,63 @@ class WanValidator(Validator):
             for p in prompt:
                 if save_img_count != -1 and save_img_count <= 0:
                     break
-                image = generate_image(
+                
+                input_dict["num_cond_frames"] = self.job_config.validation.num_cond_frames
+                logger.info(input_dict.keys())
+                video = generate_video(
                     device=self.device,
                     dtype=self._dtype,
                     job_config=self.job_config,
                     model=model,
-                    prompt=p,
+                    input_dict=input_dict,
                     wan_video_vae=self.wan_video_vae,
                     t5_tokenizer=self.t5_tokenizer,
-                    clip_tokenizer=self.clip_tokenizer,
                     t5_encoder=self.t5_encoder,
-                    clip_encoder=self.clip_encoder,
+                    precomputed_t5_embedding=self.precomputed_t5_embedding,
                 )
+                logger.info(f"Video shape: {video.shape}")
 
-                save_image(
-                    name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
+                save_video(
+                    name=f"video_rank{str(torch.distributed.get_rank())}_{step}.mp4",
                     output_dir=os.path.join(
                         self.job_config.job.dump_folder,
                         self.job_config.validation.save_img_folder,
                     ),
-                    x=image,
+                    video=video,
                     add_sampling_metadata=True,
-                    prompt=p,
                 )
-                save_img_count -= 1
+                # save_image(
+                #     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
+                #     output_dir=os.path.join(
+                #         self.job_config.job.dump_folder,
+                #         self.job_config.validation.save_img_folder,
+                #     ),
+                #     x=image,
+                #     add_sampling_metadata=True,
+                #     prompt=p,
+                # )
+                # save_img_count -= 1
 
-            # generate t5 and clip embeddings
+            # generate t5 embeddings
             input_dict["image"] = labels
             input_dict = preprocess_data(
                 device=self.device,
                 dtype=self._dtype,
                 wan_video_vae=self.wan_video_vae,
-                clip_encoder=self.clip_encoder,
                 t5_encoder=self.t5_encoder,
                 batch=input_dict,
+                precomputed_t5_embedding=self.precomputed_t5_embedding,
             )
-            labels = input_dict["img_encodings"].to(device_type)
-            clip_encodings = input_dict["clip_encodings"]
+            labels = input_dict["latents"]
+            # labels = input_dict["img_encodings"].to(device_type)
             t5_encodings = input_dict["t5_encodings"]
+            logger.info(f"T5 encodings shape: {t5_encodings.shape}")
+            logger.info(f"Labels shape: {labels.shape}")
 
             bsz = labels.shape[0]
 
+            raise NotImplementedError("Not implemented")
+            # TODO: Add here the sampling code for Wan model
             # If using all_timesteps we generate all 8 timesteps and expand our batch inputs here
             if self.all_timesteps:
                 stratified_timesteps = torch.tensor(
@@ -181,7 +205,6 @@ class WanValidator(Validator):
                     dtype=torch.float32,
                     device=self.device,
                 ).repeat(bsz)
-                clip_encodings = clip_encodings.repeat_interleave(8, dim=0)
                 t5_encodings = t5_encodings.repeat_interleave(8, dim=0)
                 labels = labels.repeat_interleave(8, dim=0)
             else:
@@ -242,7 +265,6 @@ class WanValidator(Validator):
                             img_ids=latent_pos_enc,
                             txt=t5_encodings,
                             txt_ids=text_pos_enc,
-                            y=clip_encodings,
                             timesteps=timesteps,
                         )
 

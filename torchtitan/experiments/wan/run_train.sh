@@ -14,9 +14,13 @@ NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/wan/train_configs/wan_1xwm.toml"}
 
-PYTORCH_ALLOC_CONF="expandable_segments:True" \
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
+export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-"INFO"}
+export PYTHONUNBUFFERED=1
+
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
+--log-dir ./logs \
 -m torchtitan.experiments.wan.train \
 --job.config_file ${CONFIG_FILE} "$@"
 # --job.custom_config_module ${CONFIG_FILE} "$@"

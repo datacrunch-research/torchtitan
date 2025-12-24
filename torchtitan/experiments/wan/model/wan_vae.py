@@ -1,4 +1,4 @@
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import logger, init_logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +9,6 @@ from typing import Optional
 from torchmetrics.functional.image import peak_signal_noise_ratio
 from torchtitan.tools.logging import logger
 from torchtitan.experiments.wan.model.dataset import RawVideoDataset
-
 
 
 import os
@@ -34,7 +33,6 @@ class WanVAEParams:
     vae_type: str = "standard"
     z_dim: int = 16
     dim: Optional[int] = None
-
 
 
 def check_is_instance(model, module_class):
@@ -309,7 +307,7 @@ class Resample38(Resample):
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         """Forward pass for Resample38, matching parent Resample.forward() logic."""
         b, c, t, h, w = x.size()
-        
+
         # Handle temporal upsampling for upsample3d mode (before spatial resampling)
         if self.mode == "upsample3d":
             if feat_cache is not None:
@@ -352,58 +350,32 @@ class Resample38(Resample):
                     x = x.reshape(b, 2, c, t, h, w)
                     x = torch.stack((x[:, 0, :, :, :, :], x[:, 1, :, :, :, :]), 3)
                     x = x.reshape(b, c, t * 2, h, w)
-        
+
         # Apply spatial downsampling (or upsampling)
         t = x.shape[2]
         x = rearrange(x, "b c t h w -> (b t) c h w")
         x = self.resample(x)
         x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
-        
+
         # Handle temporal downsampling for downsample3d mode (after spatial resampling)
+        # Match the correct behavior from original_vae2_2.py
         if self.mode == "downsample3d":
             if feat_cache is not None:
                 idx = feat_idx[0]
                 if feat_cache[idx] is None:
-                    # First time: apply temporal compression and cache the result
-                    # Pad temporal dimension to be divisible by stride and at least kernel_size
-                    t_curr = x.shape[2]
-                    kernel_t = self.time_conv.kernel_size[0]  # Get kernel size from time_conv
-                    # Pad to be divisible by stride (2) and at least kernel_size
-                    pad_t = max((2 - t_curr % 2) % 2, max(0, kernel_t - t_curr))
-                    if pad_t > 0:
-                        x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
-                    # Apply temporal convolution with stride 2
-                    x = self.time_conv(x)
-                    # Cache the last frame for next chunk
-                    feat_cache[idx] = x[:, :, -1:, :, :].clone()
+                    # First chunk: cache the input before temporal conv, do NOT apply temporal conv
+                    # This matches the correct behavior in original_vae2_2.py
+                    feat_cache[idx] = x.clone()
                     feat_idx[0] += 1
                 else:
-                    # Subsequent times: concatenate with cached frame and apply compression
+                    # Subsequent chunks: concatenate cached frame with current input, then apply temporal conv
                     cache_x = x[:, :, -1:, :, :].clone()
-                    cached_frame = feat_cache[idx][:, :, -1:, :, :]
-                    x_concat = torch.cat([cached_frame, x], 2)
-                    # Ensure we have enough frames for the kernel
-                    kernel_t = self.time_conv.kernel_size[0]
-                    t_concat = x_concat.shape[2]
-                    if t_concat < kernel_t:
-                        # Pad if needed
-                        pad_t = kernel_t - t_concat
-                        x_concat = F.pad(x_concat, (0, 0, 0, 0, 0, pad_t))
-                    x = self.time_conv(x_concat)
+                    x = self.time_conv(
+                        torch.cat([feat_cache[idx][:, :, -1:, :, :], x], 2)
+                    )
                     feat_cache[idx] = cache_x
                     feat_idx[0] += 1
-            else:
-                # When feat_cache is None, still apply temporal downsampling
-                # Pad temporal dimension to be divisible by stride and at least kernel_size
-                t_curr = x.shape[2]
-                kernel_t = self.time_conv.kernel_size[0]  # Get kernel size from time_conv
-                # Pad to be divisible by stride (2) and at least kernel_size
-                pad_t = max((2 - t_curr % 2) % 2, max(0, kernel_t - t_curr))
-                if pad_t > 0:
-                    x = F.pad(x, (0, 0, 0, 0, 0, pad_t))
-                # Apply temporal convolution with stride 2
-                x = self.time_conv(x)
-        
+
         return x
 
 
@@ -624,21 +596,10 @@ class Down_ResidualBlock(nn.Module):
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         x_copy = x.clone()
-        
-        # Process through downsample modules
-        for i, module in enumerate(self.downsamples):
+        for module in self.downsamples:
             x = module(x, feat_cache, feat_idx)
 
-        # Compute shortcut path
-        x_shortcut = self.avg_shortcut(x_copy)
-        
-        # Handle temporal dimension mismatch: if shapes don't match, interpolate shortcut
-        if x.shape[2] != x_shortcut.shape[2]:
-            # Interpolate shortcut to match main path's temporal dimension
-            x_shortcut = torch.nn.functional.interpolate(
-                x_shortcut, size=(x.shape[2], x.shape[3], x.shape[4]), mode='trilinear', align_corners=False
-            )
-        return x + x_shortcut
+        return x + self.avg_shortcut(x_copy)
 
 
 class Up_ResidualBlock(nn.Module):
@@ -1278,7 +1239,7 @@ class VideoVAE_(nn.Module):
 
 class WanVideoVAE(nn.Module):
     def __init__(self, z_dim=16, torch_dtype=torch.bfloat16):
-        super().__init__()        
+        super().__init__()
         mean = [
             -0.7571,
             -0.7089,
@@ -1320,7 +1281,9 @@ class WanVideoVAE(nn.Module):
         self.scale = [self.mean, 1.0 / self.std]
 
         # init model
-        self.model = VideoVAE_(z_dim=z_dim).to(dtype=torch_dtype).eval().requires_grad_(False)
+        self.model = (
+            VideoVAE_(z_dim=z_dim).to(dtype=torch_dtype).eval().requires_grad_(False)
+        )
         self.upsampling_factor = 8
         self.z_dim = z_dim
         # Store dtype for output conversion
@@ -1507,11 +1470,16 @@ class WanVideoVAE(nn.Module):
         return video
 
     def encode(
-        self, videos: torch.Tensor, device, tiled=False, tile_size=(34, 34), tile_stride=(18, 16)
+        self,
+        videos: torch.Tensor,
+        device,
+        tiled=False,
+        tile_size=(34, 34),
+        tile_stride=(18, 16),
     ) -> torch.Tensor:
         """
         Encode videos to latent representations.
-        
+
         Args:
             videos: Batched video tensor of shape (B, C, T, H, W) where:
                 - B: batch size
@@ -1523,22 +1491,22 @@ class WanVideoVAE(nn.Module):
             tiled: If True, use tiled encoding for memory efficiency
             tile_size: Size of tiles for tiled encoding (height, width)
             tile_stride: Stride between tiles for tiled encoding (height, width)
-            
+
         Returns:
             Hidden states tensor of shape (B, z_dim, T', H', W') where T', H', W' are
             downsampled temporal and spatial dimensions based on the VAE's upsampling factor.
         """
         # Ensure videos are on the correct device
         videos = videos.to(device)
-        
+
         # Validate input shape
         if videos.dim() != 5:
             raise ValueError(
                 f"Expected videos to be 5D tensor (B, C, T, H, W), got {videos.dim()}D tensor"
             )
-        
+
         B, C, T, H, W = videos.shape
-        
+
         if tiled:
             # For tiled encoding, process each video in the batch separately
             # since tiling is done per-video
@@ -1550,11 +1518,11 @@ class WanVideoVAE(nn.Module):
                 tile_stride[0] * self.upsampling_factor,
                 tile_stride[1] * self.upsampling_factor,
             )
-            
+
             hidden_states = []
             for b in range(B):
                 # Extract single video from batch: (1, C, T, H, W)
-                video = videos[b:b+1]
+                video = videos[b : b + 1]
                 hidden_state = self.tiled_encode(video, device, tile_size, tile_stride)
                 hidden_states.append(hidden_state)
             # Stack results: (B, z_dim, T', H', W')
@@ -1562,7 +1530,7 @@ class WanVideoVAE(nn.Module):
         else:
             # For non-tiled encoding, process entire batch at once for better performance
             hidden_states = self.single_encode(videos, device)
-        
+
         # Convert output to the VAE's dtype (typically bfloat16)
         hidden_states = hidden_states.to(dtype=self.torch_dtype)
         return hidden_states
@@ -1577,7 +1545,7 @@ class WanVideoVAE(nn.Module):
     ) -> torch.Tensor:
         """
         Decode latent representations back to videos.
-        
+
         Args:
             hidden_states: Batched hidden states tensor of shape (B, z_dim, T', H', W') where:
                 - B: batch size
@@ -1589,30 +1557,34 @@ class WanVideoVAE(nn.Module):
             tiled: If True, use tiled decoding for memory efficiency
             tile_size: Size of tiles for tiled decoding (height, width)
             tile_stride: Stride between tiles for tiled decoding (height, width)
-            
+
         Returns:
             Decoded video tensor of shape (B, C, T, H, W) where T, H, W are upsampled
             temporal and spatial dimensions based on the VAE's upsampling factor.
         """
         # Ensure hidden_states are on the correct device
         hidden_states = hidden_states.to(device)
-        
+
         # Validate input shape
         if hidden_states.dim() != 5:
             raise ValueError(
                 f"Expected hidden_states to be 5D tensor (B, z_dim, T', H', W'), "
                 f"got {hidden_states.dim()}D tensor"
             )
-        
+
         B = hidden_states.shape[0]
-        
+
         if tiled:
             # For tiled decoding, process each latent in the batch separately
             # since tiling is done per-video
             videos = []
+            logger.info(f"B: {B}")
             for b in range(B):
                 # Extract single latent from batch: (1, z_dim, T', H', W')
-                hidden_state = hidden_states[b:b+1]
+                hidden_state = hidden_states[b : b + 1]
+                logger.info(f"Hidden state shape: {hidden_state.shape}")
+                hidden_state = hidden_state.transpose(1, 2)
+                logger.info(f"Hidden state shape: {hidden_state.shape}")
                 video = self.tiled_decode(hidden_state, device, tile_size, tile_stride)
                 videos.append(video)
             # Stack results: (B, C, T, H, W)
@@ -1620,7 +1592,7 @@ class WanVideoVAE(nn.Module):
         else:
             # For non-tiled decoding, process entire batch at once for better performance
             videos = self.single_decode(hidden_states, device)
-        
+
         # Convert output to the VAE's dtype (typically bfloat16)
         videos = videos.to(dtype=self.torch_dtype)
         return videos
@@ -1720,6 +1692,7 @@ class VideoVAE38_(VideoVAE_):
 
     def decode(self, z, scale):
         self.clear_cache()
+        logger.info(f"Z shape: {z.shape}")
         if isinstance(scale[0], torch.Tensor):
             scale = [s.to(dtype=z.dtype, device=z.device) for s in scale]
             z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
@@ -1872,33 +1845,33 @@ class WanVideoVAE38(WanVideoVAE):
 def _extract_state_dict_from_checkpoint(checkpoint: dict) -> dict:
     """
     Extract the actual state dict from a checkpoint that may be nested.
-    
+
     Checkpoints can have different structures:
     - Direct state dict: {'layer1.weight': tensor, ...}
     - Nested with 'state_dict' key: {'state_dict': {'layer1.weight': tensor, ...}, ...}
     - Nested with 'model' key: {'model': {'layer1.weight': tensor, ...}, ...}
     - Nested with 'vae' key: {'vae': {'layer1.weight': tensor, ...}, ...}
-    
+
     Args:
         checkpoint: The loaded checkpoint dictionary
-        
+
     Returns:
         The extracted state dict
     """
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Expected checkpoint to be a dict, got {type(checkpoint)}")
-    
+
     # Priority order: state_dict > model > vae > direct state dict
     # Check for nested structures in order of preference
-    if 'state_dict' in checkpoint:
+    if "state_dict" in checkpoint:
         logger.debug("Extracting state dict from 'state_dict' key")
-        return checkpoint['state_dict']
-    elif 'model' in checkpoint:
+        return checkpoint["state_dict"]
+    elif "model" in checkpoint:
         logger.debug("Extracting state dict from 'model' key")
-        return checkpoint['model']
-    elif 'vae' in checkpoint:
+        return checkpoint["model"]
+    elif "vae" in checkpoint:
         logger.debug("Extracting state dict from 'vae' key")
-        return checkpoint['vae']
+        return checkpoint["vae"]
     else:
         # Assume it's already a direct state dict
         logger.debug("Checkpoint appears to be a direct state dict")
@@ -1906,63 +1879,62 @@ def _extract_state_dict_from_checkpoint(checkpoint: dict) -> dict:
 
 
 def _normalize_state_dict_keys(
-    checkpoint_keys: list[str], 
-    model_keys: list[str]
+    checkpoint_keys: list[str], model_keys: list[str]
 ) -> dict[str, str]:
     """
     Determine the key transformation needed to match checkpoint keys to model keys.
-    
+
     This function analyzes the prefix patterns in both checkpoint and model keys
     to determine if prefixes need to be added or removed.
-    
+
     Args:
         checkpoint_keys: List of keys from the checkpoint
         model_keys: List of keys expected by the model
-        
+
     Returns:
         A dictionary mapping old keys to new keys (identity mapping if no change needed)
     """
     if not checkpoint_keys or not model_keys:
         return {k: k for k in checkpoint_keys}
-    
+
     # Analyze prefix patterns
-    checkpoint_has_model_prefix = any(k.startswith('model.') for k in checkpoint_keys)
-    checkpoint_has_vae_prefix = any(k.startswith('vae.') for k in checkpoint_keys)
-    model_has_model_prefix = any(k.startswith('model.') for k in model_keys)
-    model_has_vae_prefix = any(k.startswith('vae.') for k in model_keys)
-    
+    checkpoint_has_model_prefix = any(k.startswith("model.") for k in checkpoint_keys)
+    checkpoint_has_vae_prefix = any(k.startswith("vae.") for k in checkpoint_keys)
+    model_has_model_prefix = any(k.startswith("model.") for k in model_keys)
+    model_has_vae_prefix = any(k.startswith("vae.") for k in model_keys)
+
     # Determine transformation strategy
     key_mapping = {}
-    
+
     for ckpt_key in checkpoint_keys:
         new_key = ckpt_key
-        
+
         # Case 1: Remove 'model.' prefix if checkpoint has it but model doesn't
         if checkpoint_has_model_prefix and not model_has_model_prefix:
-            if ckpt_key.startswith('model.'):
-                new_key = ckpt_key.replace('model.', '', 1)
+            if ckpt_key.startswith("model."):
+                new_key = ckpt_key.replace("model.", "", 1)
                 logger.debug(f"Removing 'model.' prefix: {ckpt_key} -> {new_key}")
-        
+
         # Case 2: Remove 'vae.' prefix if checkpoint has it but model doesn't
         elif checkpoint_has_vae_prefix and not model_has_vae_prefix:
-            if ckpt_key.startswith('vae.'):
-                new_key = ckpt_key.replace('vae.', '', 1)
+            if ckpt_key.startswith("vae."):
+                new_key = ckpt_key.replace("vae.", "", 1)
                 logger.debug(f"Removing 'vae.' prefix: {ckpt_key} -> {new_key}")
-        
+
         # Case 3: Add 'model.' prefix if model expects it but checkpoint doesn't have it
         elif model_has_model_prefix and not checkpoint_has_model_prefix:
-            if not ckpt_key.startswith('model.'):
+            if not ckpt_key.startswith("model."):
                 new_key = f"model.{ckpt_key}"
                 logger.debug(f"Adding 'model.' prefix: {ckpt_key} -> {new_key}")
-        
+
         # Case 4: Add 'vae.' prefix if model expects it but checkpoint doesn't have it
         elif model_has_vae_prefix and not checkpoint_has_vae_prefix:
-            if not ckpt_key.startswith('vae.'):
+            if not ckpt_key.startswith("vae."):
                 new_key = f"vae.{ckpt_key}"
                 logger.debug(f"Adding 'vae.' prefix: {ckpt_key} -> {new_key}")
-        
+
         key_mapping[ckpt_key] = new_key
-    
+
     return key_mapping
 
 
@@ -1975,29 +1947,29 @@ def load_wan_vae(
 ) -> WanVideoVAE:
     """
     Load the WanVideoVAE from the given checkpoint path.
-    
+
     This function handles various checkpoint formats and automatically normalizes
     key prefixes to match the model's expected format. Supported checkpoint structures:
-    
+
     - Direct state dict: {'layer.weight': tensor, ...}
     - Nested with 'state_dict' key: {'state_dict': {...}, ...}
     - Nested with 'model' key: {'model': {...}, ...}
     - Nested with 'vae' key: {'vae': {...}, ...}
-    
+
     Key prefix normalization:
     - Automatically removes 'model.' or 'vae.' prefixes if checkpoint has them but model doesn't
     - Automatically adds 'model.' or 'vae.' prefixes if model expects them but checkpoint doesn't have them
-    
+
     Args:
         chkpt_path (str): Path to the checkpoint file (.safetensors, .pth, or .pt).
         wan_vae_params (WanVAEParams): Parameters specifying which VAE type to load.
         device (str or torch.device): The device to load the WanVideoVAE to.
         dtype: Data type for the VAE.
         random_init (bool): If True, skip loading weights and return randomly initialized model.
-        
+
     Returns:
         WanVideoVAE: The loaded WanVideoVAE (either WanVideoVAE or WanVideoVAE38).
-        
+
     Raises:
         ValueError: If checkpoint file doesn't exist or format is unsupported.
     """
@@ -2025,14 +1997,16 @@ def load_wan_vae(
 
     if chkpt_path is not None:
         # Load state dict based on file extension
-        if chkpt_path.endswith('.safetensors'):
+        if chkpt_path.endswith(".safetensors"):
             # Safetensors format is typically already a direct state dict
             raw_checkpoint = load_sft(chkpt_path, device=str(device))
             sd = _extract_state_dict_from_checkpoint(raw_checkpoint)
-        elif chkpt_path.endswith(('.pth', '.pt')):
+        elif chkpt_path.endswith((".pth", ".pt")):
             # Load .pth/.pt file and move to device
-            raw_checkpoint = torch.load(chkpt_path, map_location=device, weights_only=False)
-            
+            raw_checkpoint = torch.load(
+                chkpt_path, map_location=device, weights_only=False
+            )
+
             # Log checkpoint structure for debugging
             if isinstance(raw_checkpoint, dict):
                 top_keys = list(raw_checkpoint.keys())[:20]
@@ -2043,8 +2017,10 @@ def load_wan_vae(
                     # If it's a nested dict, show its keys
                     if isinstance(raw_checkpoint[first_key], dict):
                         nested_keys = list(raw_checkpoint[first_key].keys())[:10]
-                        logger.debug(f"First key contains dict with keys: {nested_keys}")
-            
+                        logger.debug(
+                            f"First key contains dict with keys: {nested_keys}"
+                        )
+
             # Extract state dict from nested structure if needed
             sd = _extract_state_dict_from_checkpoint(raw_checkpoint)
         else:
@@ -2052,23 +2028,23 @@ def load_wan_vae(
                 f"Unsupported checkpoint format: {chkpt_path}. "
                 f"Supported formats: .safetensors, .pth, .pt"
             )
-        
+
         # Normalize key prefixes to match model expectations
         if isinstance(sd, dict) and len(sd) > 0:
             checkpoint_keys = list(sd.keys())
             model_keys = list(vae.state_dict().keys())
-            
+
             logger.debug(f"Model expects keys like: {model_keys[:5]}...")
             logger.debug(f"Checkpoint has keys like: {checkpoint_keys[:5]}...")
-            
+
             # Get key transformation mapping
             key_mapping = _normalize_state_dict_keys(checkpoint_keys, model_keys)
-            
+
             # Apply key transformations if needed
             if any(old_key != new_key for old_key, new_key in key_mapping.items()):
                 logger.debug("Applying key prefix normalization")
                 sd = {new_key: sd[old_key] for old_key, new_key in key_mapping.items()}
-        
+
         # Load the state dict into the model
         missing, unexpected = vae.load_state_dict(sd, strict=False, assign=True)
         if len(missing) > 0:
@@ -2079,35 +2055,49 @@ def load_wan_vae(
             )
     return vae.to(dtype=dtype)
 
+
 def main():
+    from torch.utils.data import DataLoader
+    from icecream import ic 
+
+    init_logger()
     logger.info("Starting main function")
     params_38 = WanVAEParams(vae_type="38", z_dim=48)
     logger.info("Loading WanVideoVAE38")
-    vae_38 = load_wan_vae("/root/torchtitan/Wan2.2-TI2V-5B/Wan2.2_VAE.pth", params_38, device="cuda")
+    vae_38 = load_wan_vae(
+        "./assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth", params_38, device="cuda"
+    )
     logger.info("WanVideoVAE38 loaded")
 
-    from torch.utils.data import DataLoader
     dataset = RawVideoDataset(
-        data_dir="/root/dataset/world_model_raw_data/train_v2.0_raw/",
-        downsampled=4,
+        data_dir="../dataset/world_model_raw_data/train_v2.0_raw/",
+        downsampled=1,
         window_size=4,
-        robot_temporal_mode="downsampled"
+        robot_temporal_mode="downsampled",
     )
-    dataloader = DataLoader(dataset,
-        shuffle=True,
+    dataloader = DataLoader(
+        dataset,
+        shuffle=False,
         batch_size=4,
         drop_last=True,
+        num_workers=1
     )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    n_batches = 1
 
-    for batch in dataloader:
+    for i, batch in enumerate(dataloader):
+        if n_batches == i: 
+            break
         input_video, robot_states = batch
         input_video = input_video.to(device, dtype=torch.bfloat16)
         robot_states = robot_states.to(device, dtype=torch.bfloat16)
+        ic(input_video.shape)
+        ic(robot_states.shape)
 
         input_video = input_video.permute(0, 1, 4, 2, 3)
-        
+        ic("after permute", input_video.shape)
+
         # Normalize video frames between -1 and 1 (from [0, 255] range)
         # This is required because the VAE expects input in [-1, 1] range
         max_value = 1.0
@@ -2119,52 +2109,48 @@ def main():
             device=device,
         )
 
-        pred_video = vae_38.decode(
-            hidden_states=latents,
-            device=device
-        )
-        
+        pred_video = vae_38.decode(hidden_states=latents, device=device)
+
         # Compute PSNR across frames
         # input_video: (B, T, C, H, W), pred_video: (B, C, T, H, W)
         # Convert pred_video to (B, T, C, H, W) for comparison
         pred_video_aligned = pred_video.transpose(1, 2)  # (B, T, C, H, W)
-        
+
         # Ensure both are on same device and dtype for PSNR computation
         input_video_float = input_video.float()
         pred_video_float = pred_video_aligned.float()
-        
+
         # Compute PSNR for each frame separately
         # input_video and pred_video are normalized between -1 and 1, so data_range=2.0
         B, T, C, H, W = input_video_float.shape
         psnr_values = []
-        
+
         for t in range(T):
             # Extract frame t: (B, C, H, W)
             input_frame = input_video_float[:, t, :, :, :]  # (B, C, H, W)
-            pred_frame = pred_video_float[:, t, :, :, :]     # (B, C, H, W)
+            pred_frame = pred_video_float[:, t, :, :, :]  # (B, C, H, W)
             # Compute PSNR for this frame across batch
             # Reduce over channels, height, width (dim 1, 2, 3) to keep batch dimension
             psnr_frame = peak_signal_noise_ratio(
-                pred_frame, 
-                input_frame, 
-                data_range=2.0, 
+                pred_frame,
+                input_frame,
+                data_range=2.0,
                 reduction="none",
-                dim=(1, 2, 3)  # Reduce over C, H, W, keep batch dimension
+                dim=(1, 2, 3),  # Reduce over C, H, W, keep batch dimension
             )
             # psnr_frame shape: (B,) - PSNR for each sample in batch for this frame
             # Ensure it's 1D tensor
             if psnr_frame.dim() == 0:
                 psnr_frame = psnr_frame.unsqueeze(0)
             psnr_values.append(psnr_frame)
-        
+
         # Stack to get (T, B) then transpose to (B, T)
         if len(psnr_values) > 0:
             psnr_values = torch.stack(psnr_values, dim=0)  # (T, B)
             # Transpose to get (B, T)
             if psnr_values.dim() == 2:
                 psnr_values = psnr_values.transpose(0, 1)  # (B, T)
-            logger.info(f"After transpose shape: {psnr_values.shape}")
-        
+
         # psnr_values shape: (B, T) - PSNR for each batch and frame
         logger.info(f"PSNR shape: {psnr_values.shape}")
         logger.info(f"PSNR per frame (mean across batch): {psnr_values.mean(dim=0)}")
@@ -2172,17 +2158,26 @@ def main():
         logger.info(f"Overall PSNR (mean): {psnr_values.mean().item():.4f} dB")
         logger.info(f"PSNR min: {psnr_values.min().item():.4f} dB")
         logger.info(f"PSNR max: {psnr_values.max().item():.4f} dB")
-        
+
         # Debug: Check input/output ranges to verify normalization
-        logger.info(f"Input video range: [{input_video_float.min().item():.4f}, {input_video_float.max().item():.4f}]")
-        logger.info(f"Pred video range: [{pred_video_float.min().item():.4f}, {pred_video_float.max().item():.4f}]")
-        logger.info(f"Input video mean: {input_video_float.mean().item():.4f}, std: {input_video_float.std().item():.4f}")
-        logger.info(f"Pred video mean: {pred_video_float.mean().item():.4f}, std: {pred_video_float.std().item():.4f}")
-        
-        break
+        logger.info(
+            f"Input video range:\t [{input_video_float.min().item():.4f}, {input_video_float.max().item():.4f}]"
+        )
+        logger.info(
+            f"Pred video range:\t [{pred_video_float.min().item():.4f}, {pred_video_float.max().item():.4f}]"
+        )
+        logger.info(
+            f"Input video mean:\t {input_video_float.mean().item():.4f}, std: {input_video_float.std().item():.4f}"
+        )
+        logger.info(
+            f"Pred video mean:\t {pred_video_float.mean().item():.4f}, std: {pred_video_float.std().item():.4f}"
+        )
+
+        # break
     # # Test loading standard WanVideoVAE
     # params_std = WanVAEParams(vae_type="standard", z_dim=16)
     # vae_std = load_wan_vae("path/to/checkpoint.safetensors", params_std, device="cuda")
+
 
 if __name__ == "__main__":
     main()

@@ -167,7 +167,6 @@ def _process_cc12m_image(
 def _cc12m_wds_data_processor(
     sample: dict[str, Any],
     t5_tokenizer: WanTokenizer,
-    clip_tokenizer: WanTokenizer,
     output_size: int = 256,
 ) -> dict[str, Any]:
     """
@@ -176,17 +175,14 @@ def _cc12m_wds_data_processor(
     Args:
         sample: A sample from dataset
         t5_encoder: T5 encoder
-        clip_encoder: CLIP encoder
         output_size: The output image size
 
     """
     img = _process_cc12m_image(sample["jpg"], output_size=output_size)
     t5_tokens = t5_tokenizer.encode(sample["txt"])
-    clip_tokens = clip_tokenizer.encode(sample["txt"])
 
     return {
         "image": img,
-        "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
         "prompt": sample["txt"],  # type: str
     }
@@ -195,7 +191,6 @@ def _cc12m_wds_data_processor(
 def _coco_data_processor(
     sample: dict[str, Any],
     t5_tokenizer: WanTokenizer,
-    clip_tokenizer: WanTokenizer,
     output_size: int = 256,
 ) -> dict[str, Any]:
     """
@@ -204,7 +199,6 @@ def _coco_data_processor(
     Args:
         sample: A sample from dataset
         t5_encoder: T5 encoder
-        clip_encoder: CLIP encoder
         output_size: The output image size
 
     """
@@ -213,11 +207,9 @@ def _coco_data_processor(
     if isinstance(prompt, list):
         prompt = prompt[0]
     t5_tokens = t5_tokenizer.encode(prompt)
-    clip_tokens = clip_tokenizer.encode(prompt)
 
     return {
         "image": img,
-        "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
         "prompt": prompt,  # type: str
     }
@@ -225,7 +217,6 @@ def _coco_data_processor(
 def _load_raw_video_dataset(
     dataset_path: str,
     downsampled: int = 4,
-    clip_length: int = 77,
     repeat: int = 1,
     window_size: int = 8,
     robot_temporal_mode: str = "downsample",
@@ -236,9 +227,7 @@ def _load_raw_video_dataset(
     Args:
         dataset_path: Path to the dataset directory
         downsampled: Downsampling factor (1, 2, or 4)
-        clip_length: Number of frames per clip
         repeat: Number of times to repeat the dataset
-        window_size: Window size for sampling clips
         robot_temporal_mode: How to handle robot state temporal alignment
         
     Returns:
@@ -248,7 +237,6 @@ def _load_raw_video_dataset(
     return BaseRawVideoDataset(
         data_dir=dataset_path,
         downsampled=downsampled,
-        clip_length=clip_length,
         repeat=repeat,
         window_size=window_size,
         robot_temporal_mode=robot_temporal_mode,
@@ -258,10 +246,8 @@ def _load_raw_video_dataset(
 def _process_raw_video_sample(
     sample: tuple[torch.Tensor, torch.Tensor],
     t5_tokenizer: WanTokenizer,
-    clip_tokenizer: WanTokenizer,
     job_config: Optional[JobConfig] = None,
     t5_empty_tokens: Optional[list[int]] = None,
-    clip_empty_tokens: Optional[list[int]] = None,
 ) -> dict[str, Any]:
     """
     Process RawVideoDataset sample (video frames and robot states).
@@ -271,10 +257,8 @@ def _process_raw_video_sample(
             - video_frames: Tensor of shape [T, H, W, C]
             - robot_states: Tensor of shape [T, state_dim]
         t5_tokenizer: T5 tokenizer for text encoding
-        clip_tokenizer: CLIP tokenizer for text encoding
         job_config: Job configuration (optional, for accessing config params)
         t5_empty_tokens: Precomputed empty string tokens for T5 (optional, for efficiency)
-        clip_empty_tokens: Precomputed empty string tokens for CLIP (optional, for efficiency)
         
     Returns:
         Dictionary with processed video frames, robot states, and tokens
@@ -292,15 +276,10 @@ def _process_raw_video_sample(
     else:
         t5_tokens = t5_tokenizer.encode(prompt) if prompt else t5_tokenizer.encode("")
     
-    if clip_empty_tokens is not None:
-        clip_tokens = clip_empty_tokens
-    else:
-        clip_tokens = clip_tokenizer.encode(prompt) if prompt else clip_tokenizer.encode("")
-    
+   
     return {
         "video_frames": video_frames,  # Shape: [T, H, W, C]
         "robot_states": robot_states,  # Shape: [T, state_dim]
-        "clip_tokens": clip_tokens,
         "t5_tokens": t5_tokens,
         "prompt": prompt,
     }
@@ -358,7 +337,6 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
         dataset_name: Name of the dataset
         dataset_path: Path to the dataset directory
         t5_tokenizer: T5 tokenizer
-        clip_tokenizer: CLIP tokenizer
         job_config: Job configuration
         dp_rank: Data parallel rank
         dp_world_size: Data parallel world size
@@ -370,7 +348,6 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
         dataset_name: str,
         dataset_path: str,
         t5_tokenizer: BaseTokenizer,
-        clip_tokenizer: BaseTokenizer,
         job_config: Optional[JobConfig] = None,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -389,11 +366,7 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
         else:
             downsampled = 4
             
-        if job_config and hasattr(job_config.training, 'clip_length'):
-            clip_length = getattr(job_config.training, 'clip_length', 77)
-        else:
-            clip_length = 77
-            
+
         if job_config and hasattr(job_config.training, 'window_size'):
             window_size = getattr(job_config.training, 'window_size', 8)
         else:
@@ -410,7 +383,6 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
             raw_dataset = dataset_loader(
                 path,
                 downsampled=downsampled,
-                clip_length=clip_length,
                 window_size=window_size,
                 robot_temporal_mode=robot_temporal_mode,
             )
@@ -433,8 +405,6 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
         
         self._t5_tokenizer = t5_tokenizer
         self._t5_empty_token = t5_tokenizer.encode("")
-        self._clip_tokenizer = clip_tokenizer
-        self._clip_empty_token = clip_tokenizer.encode("")
         self._data_processor = data_processor
         self.job_config = job_config
         
@@ -466,10 +436,8 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
                 sample_dict = self._data_processor(
                     sample,
                     self._t5_tokenizer,
-                    self._clip_tokenizer,
                     job_config=self.job_config,
                     t5_empty_tokens=self._t5_empty_token,
-                    clip_empty_tokens=self._clip_empty_token,
                 )
                 
                 self._sample_idx = idx + 1
@@ -532,7 +500,12 @@ def build_wan_dataloader(
     pin_memory = job_config.training.pin_memory
     prefetch_factor = job_config.training.prefetch_factor
 
-    t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
+    # TODO: Without this the dataset_wan test fails
+    # TODO: Add the code to pass the correct prefetch_factor/num_workers/persistent_workers when testing
+    if num_workers == 0 and prefetch_factor != 1.:
+        prefetch_factor = None
+
+    t5_tokenizer = build_wan_tokenizer(job_config)
 
     # Only support 1xwm video dataset
     if dataset_name != "1xwm":
@@ -544,7 +517,6 @@ def build_wan_dataloader(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         t5_tokenizer=t5_tokenizer,
-        clip_tokenizer=clip_tokenizer,
         job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
@@ -586,7 +558,7 @@ def build_wan_validation_dataloader(
     pin_memory = job_config.training.pin_memory
     prefetch_factor = job_config.training.prefetch_factor
 
-    t5_tokenizer, clip_tokenizer = build_wan_tokenizer(job_config)
+    t5_tokenizer = build_wan_tokenizer(job_config)
 
     # Only support 1xwm video dataset
     if dataset_name != "1xwm":
@@ -598,7 +570,6 @@ def build_wan_validation_dataloader(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         t5_tokenizer=t5_tokenizer,
-        clip_tokenizer=clip_tokenizer,
         job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,

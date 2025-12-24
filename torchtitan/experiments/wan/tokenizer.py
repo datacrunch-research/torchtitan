@@ -132,30 +132,29 @@ class WanTokenizer(BaseTokenizer):
         return self._tokenizer.decode(t)
 
 
-def build_wan_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseTokenizer]:
+def build_wan_tokenizer(job_config: JobConfig) -> BaseTokenizer:
     """
-    Build the tokenizer for Flux.
+    Build the tokenizer for Wan model (T5).
     """
+    from torchtitan.tools.logging import logger
+    
     t5_tokenizer_path = job_config.encoder.t5_encoder
-    clip_tokenzier_path = job_config.encoder.clip_encoder
     max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
 
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
     if job_config.training.test_mode:
+        logger.info("Using test mode tokenizer")
         tokenizer_class = WanTestTokenizer
-        t5_tokenizer_path = clip_tokenzier_path = job_config.model.hf_assets_path
+        t5_tokenizer_path = job_config.model.hf_assets_path
     else:
         tokenizer_class = WanTokenizer
 
-    # T5 tokenzier will pad the token sequence to max_t5_encoding_len,
-    # and CLIP tokenizer will pad the token sequence to 77 (fixed number).
+    # T5 tokenizer will pad the token sequence to max_t5_encoding_len
+    logger.info(f"Loading T5 tokenizer from: {t5_tokenizer_path} (max_length={max_t5_encoding_len})")
     t5_tokenizer = tokenizer_class(
         t5_tokenizer_path,
         max_length=max_t5_encoding_len,
     )
-    clip_tokenizer = tokenizer_class(
-        clip_tokenzier_path,
-        max_length=77,
-    )
+    logger.info("T5 tokenizer loaded successfully")
 
-    return t5_tokenizer, clip_tokenizer
+    return t5_tokenizer
