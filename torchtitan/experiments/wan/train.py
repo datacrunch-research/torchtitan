@@ -52,10 +52,11 @@ class WanTrainer(Trainer):
         # For Wan model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         logger.info("Setting determinism for Wan model (distinct seeds across FSDP ranks)...")
         dist_utils.set_determinism(
-            self.parallel_dims.world_mesh,
+            self.parallel_dims,
             self.device,
             job_config.debug,
-            distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
+            # distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
+            distinct_seed_mesh_dims=["dp_replicate", "fsdp"],
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder).

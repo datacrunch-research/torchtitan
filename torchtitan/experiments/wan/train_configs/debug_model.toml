@@ -93,3 +93,5 @@ save_img_count = 50
 save_img_folder = "img"
 all_timesteps = false
 
+[debug]
+seed = 36

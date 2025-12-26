@@ -71,16 +71,17 @@ def parallelize_wan(
         sys.stdout.flush()
 
     if parallel_dims.fsdp_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
 
         logger.info("  [parallelize_wan] Applying FSDP wrapping (this may take a minute)...")
         sys.stdout.flush()
+        
         apply_fsdp(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             cpu_offload=job_config.training.enable_cpu_offload,
