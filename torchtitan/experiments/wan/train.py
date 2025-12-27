@@ -17,7 +17,6 @@ from torchtitan.tools import utils
 from torchtitan.components.dataloader import DataloaderExhaustedError
 
 
-
 from torchtitan.experiments.wan.infra.parallelize import parallelize_encoders
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.utils import (
@@ -34,7 +33,6 @@ from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
 
-
 class WanTrainer(Trainer):
     # Note: Wan model now uses the standard initialization flow in train.py.
     # Weight loading into FSDP-wrapped models is supported via set_model_state_dict(),
@@ -45,12 +43,16 @@ class WanTrainer(Trainer):
         logger.info("Initializing WanTrainer...")
         logger.info("=" * 80)
         super().__init__(job_config)
-        logger.info("Base Trainer initialization completed, continuing with Wan-specific setup...")
+        logger.info(
+            "Base Trainer initialization completed, continuing with Wan-specific setup..."
+        )
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         # For Wan model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
-        logger.info("Setting determinism for Wan model (distinct seeds across FSDP ranks)...")
+        logger.info(
+            "Setting determinism for Wan model (distinct seeds across FSDP ranks)..."
+        )
         dist_utils.set_determinism(
             self.parallel_dims,
             self.device,
@@ -76,7 +78,7 @@ class WanTrainer(Trainer):
         logger.info("=" * 80)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         logger.info(f"  - Model args: {model_args}")
-        
+
         logger.info(f"  - Loading Wan VAE from: {job_config.encoder.wan_vae_path}")
         logger.info(f"    Device: {self.device}, Dtype: {self._dtype}")
         self.wan_video_vae = load_wan_vae(
@@ -87,8 +89,26 @@ class WanTrainer(Trainer):
             random_init=job_config.training.test_mode,
         )
         logger.info("  ✓ Wan VAE loaded successfully")
-        # TODO: add here the loading of the WanVideoVAE38
-        
+
+        # Apply torch.compile to VAE for faster encoding
+        # Note: Using mode="default" instead of "reduce-overhead" because the VAE's
+        # cache mechanism is incompatible with CUDA graphs used by reduce-overhead
+        if job_config.compile.enable and "vae" in job_config.compile.components:
+            logger.info("  - Compiling VAE encoder/decoder with torch.compile...")
+            self.wan_video_vae.model.encoder = torch.compile(
+                self.wan_video_vae.model.encoder,
+                mode="default",  # Don't use CUDA graphs (incompatible with cache)
+                backend=job_config.compile.backend,
+                fullgraph=False,  # Allow graph breaks for cache mechanism
+            )
+            self.wan_video_vae.model.decoder = torch.compile(
+                self.wan_video_vae.model.decoder,
+                mode="default",  # Don't use CUDA graphs (incompatible with cache)
+                backend=job_config.compile.backend,
+                fullgraph=False,
+            )
+            logger.info("  ✓ VAE compiled successfully")
+
         logger.info(f"  - Loading T5 encoder: {job_config.encoder.t5_encoder}")
         logger.info(f"    Device: {self.device}, Dtype: {self._dtype}")
         self.t5_encoder = WanEmbedder(
@@ -115,9 +135,13 @@ class WanTrainer(Trainer):
         logger.info("=" * 80)
         logger.info("STEP 7: Precomputing empty string embeddings for T5")
         logger.info("=" * 80)
-        logger.info("  - This allows encoder to be offloaded since we only encode empty strings (\"\")")
+        logger.info(
+            '  - This allows encoder to be offloaded since we only encode empty strings ("")'
+        )
         logger.info("  - T5 uses last_hidden_state for per-token embeddings")
-        logger.info("  - Precomputed embeddings will be reused during training to avoid encoder forward passes")
+        logger.info(
+            "  - Precomputed embeddings will be reused during training to avoid encoder forward passes"
+        )
         with torch.no_grad():
             # Get empty string tokens
             logger.info("  - Building tokenizer...")
@@ -125,33 +149,43 @@ class WanTrainer(Trainer):
             logger.info("  - Encoding empty string...")
             empty_t5_tokens_tensor = t5_tokenizer.encode("").to(device=self.device)
             logger.info(f"  - T5 tokens shape: {empty_t5_tokens_tensor.shape}")
-            
+
             logger.info("  - Computing embeddings using encoder...")
             # Compute embeddings using the encoder (after FSDP wrapping)
-            self._precomputed_t5_embedding = self.t5_encoder(empty_t5_tokens_tensor).to(dtype=self._dtype)
-            
-            logger.info(f"  - T5 embedding shape (before squeeze): {self._precomputed_t5_embedding.shape}")
-            
+            self._precomputed_t5_embedding = self.t5_encoder(empty_t5_tokens_tensor).to(
+                dtype=self._dtype
+            )
+
+            logger.info(
+                f"  - T5 embedding shape (before squeeze): {self._precomputed_t5_embedding.shape}"
+            )
+
             # Remove batch dimension for single sample
             logger.info("  - Removing batch dimension...")
-            self._precomputed_t5_embedding = self._precomputed_t5_embedding.squeeze(0)  # [seq_len, hidden_dim]
-            
-            logger.info(f"  - T5 embedding shape (after squeeze): {self._precomputed_t5_embedding.shape}")
-            
+            self._precomputed_t5_embedding = self._precomputed_t5_embedding.squeeze(
+                0
+            )  # [seq_len, hidden_dim]
+
+            logger.info(
+                f"  - T5 embedding shape (after squeeze): {self._precomputed_t5_embedding.shape}"
+            )
+
         logger.info("  ✓ Empty string embeddings precomputed successfully")
-        
+
         # Delete T5 encoder after precomputation to free memory
         # It's no longer needed since we use precomputed embeddings
         # if not job_config.validation.enable:
-        logger.info("  - Deleting T5 encoder (no longer needed, using precomputed embeddings)...")
+        logger.info(
+            "  - Deleting T5 encoder (no longer needed, using precomputed embeddings)..."
+        )
         del self.t5_encoder
         self.t5_encoder = None
         # Also delete tokenizer as it's no longer needed
         del t5_tokenizer
-        
+
         logger.info("  ✓ Encoder and tokenizer deleted to free memory")
         # else:
-            # logger.info("  - Keeping encoder (validation is enabled and may need it)")
+        # logger.info("  - Keeping encoder (validation is enabled and may need it)")
 
         if job_config.validation.enable:
             logger.info("Initializing Wan validator...")
@@ -161,16 +195,15 @@ class WanTrainer(Trainer):
                 _dtype=self._dtype,
                 wan_video_vae=self.wan_video_vae,
                 t5_encoder=self.t5_encoder,
-                precomputed_t5_embedding=self._precomputed_t5_embedding
+                precomputed_t5_embedding=self._precomputed_t5_embedding,
             )
             logger.info("Wan validator initialized")
             # TODO: also here add the validation code for wan
-        
+
         logger.info("=" * 80)
         logger.info("WanTrainer initialization completed")
         logger.info("=" * 80)
 
-    
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
@@ -188,8 +221,16 @@ class WanTrainer(Trainer):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             # logger.info(f"labels.shape: {labels.shape}")
-            ntokens_batch = 1 + (labels.shape[1] - 1) // 4 *  labels.shape[2] // 16 * labels.shape[3] // 16
-            
+            ntokens_batch = (
+                1
+                + (labels.shape[1] - 1)
+                // 4
+                * labels.shape[2]
+                // 16
+                * labels.shape[3]
+                // 16
+            )
+
             # logger.info(f"ntokens_batch: {ntokens_batch}")
             # logger.info(f"self.ntokens_seen: {self.ntokens_seen}")
             self.ntokens_seen += ntokens_batch
@@ -215,7 +256,7 @@ class WanTrainer(Trainer):
             device=self.device,
             dtype=self._dtype,
             wan_video_vae=self.wan_video_vae,
-            t5_encoder=getattr(self, 't5_encoder', None),
+            t5_encoder=getattr(self, "t5_encoder", None),
             batch=input_dict,
             precomputed_t5_embedding=self._precomputed_t5_embedding,
         )
@@ -229,12 +270,13 @@ class WanTrainer(Trainer):
         t5_encodings = input_dict["t5_encodings"]
         labels = input_dict["latents"]
 
-
         bsz = labels.shape[0]
 
         # Get number of conditioning frames to keep clean (no noise)
         # The model expects first num_latent_cond frames to be clean for conditioning
-        num_latent_cond = model.num_latent_cond if hasattr(model, 'num_latent_cond') else 2
+        num_latent_cond = (
+            model.num_latent_cond if hasattr(model, "num_latent_cond") else 2
+        )
 
         # Generate noise and timesteps for diffusion training
         with torch.no_grad(), torch.device(self.device):
@@ -244,12 +286,14 @@ class WanTrainer(Trainer):
             # Mix clean latents with noise based on timesteps
             # Shape: (B, C, T, H, W) - we mask along temporal dimension (dim=2)
             latents = (1 - sigmas) * labels + sigmas * noise
-            
+
             # Masking: Keep first num_latent_cond frames clean (no noise) for conditioning
             # These frames serve as conditioning context for the model
             if num_latent_cond > 0 and labels.shape[2] > num_latent_cond:
                 # Keep first num_latent_cond frames as clean latents (no noise)
-                latents[:, :, :num_latent_cond, :, :] = labels[:, :, :num_latent_cond, :, :]
+                latents[:, :, :num_latent_cond, :, :] = labels[
+                    :, :, :num_latent_cond, :, :
+                ]
         # logger.info(f"latents shape: {latents.shape}")
         # logger.info(f"latents device: {latents.device}")
         # assert latents.dtype == torch.bfloat16, "Latents must be bfloat16"
@@ -265,7 +309,7 @@ class WanTrainer(Trainer):
 
             # Patchify: Convert latent into a sequence of patches
             latents_p = pack_latents(latents)
-            
+
             # Compute target: noise - labels for frames that need prediction
             # For conditioning frames (first num_latent_cond), target should be zero
             # since we're not predicting noise for clean conditioning frames
@@ -307,7 +351,7 @@ class WanTrainer(Trainer):
                     timesteps=timesteps,
                     context=t5_encodings,
                     robot_states=input_dict["robot_states"],
-                )  
+                )
 
                 # Pack the model output to match the target format
                 # Model outputs (B, C, T, H, W), target is (B, T*H/2*W/2, C*4)
@@ -329,25 +373,27 @@ if __name__ == "__main__":
     logger.info("=" * 80)
     logger.info("Starting Wan training script")
     logger.info("=" * 80)
-    
+
     config_manager = ConfigManager()
     config = config_manager.parse_args()
-    logger.info(f"Configuration loaded: {config.job.config_file if hasattr(config.job, 'config_file') else 'N/A'}")
+    logger.info(
+        f"Configuration loaded: {config.job.config_file if hasattr(config.job, 'config_file') else 'N/A'}"
+    )
     trainer: Optional[WanTrainer] = None
 
     try:
         logger.info("Creating WanTrainer instance...")
         trainer = WanTrainer(config)
         logger.info("WanTrainer created successfully")
-        
+
         if config.checkpoint.create_seed_checkpoint:
             logger.info("Creating seed checkpoint...")
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable
-            ), "Must enable checkpointing when creating a seed checkpoint."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
+            assert config.checkpoint.enable, (
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Seed checkpoint created successfully")
         else:

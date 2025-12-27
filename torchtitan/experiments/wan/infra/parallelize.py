@@ -217,13 +217,14 @@ def parallelize_encoders(
 
         fully_shard(t5_model.hf_module, **fsdp_config)
 
-        fully_shard(wan_video_vae.model.encoder, **fsdp_config)
-        fully_shard(wan_video_vae.model.decoder, **fsdp_config)
-        fully_shard(wan_video_vae.model, **fsdp_config)
+        # TODO: wrapping with FSDP the wan_video_vae introduces problem with how the cache is handled. Are there better way to
+        # fully_shard(wan_video_vae.model.encoder, **fsdp_config)
+        # fully_shard(wan_video_vae.model.decoder, **fsdp_config)
+        # fully_shard(wan_video_vae.model, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the T5 encoder model and WanVAE")
+            logger.info("Applied HSDP to the T5 encoder model")
         else:
-            logger.info("Applied FSDP to the T5 encoder model and WanVAE")
+            logger.info("Applied FSDP to the T5 encoder model")
 
     return t5_model, wan_video_vae
