@@ -24,6 +24,7 @@ What TorchTitan people had for FLUX.1:
 - VAE and FSDP:
     - While implementing the VAE I found applying FSDP breaks the cache mechanism so it needs some fixes (WIP)
     - Consider doing a reimplementation of that part (it also fails with `torch.compile`)
+    - torchao?
 - [x] add `wan_dataset` unit test
 - [x] get the fwd pass
     - currently is possible to run `torchrun --nproc_per_node=4 torchtitan/experiments/wan/train.py  --job.config_file torchtitan/experiments/wan/train_configs/wan_cc1xm.toml  2>&1 | tee debug.err`
@@ -62,3 +63,71 @@ The "38" naming likely comes from an internal Alibaba version number. The key ar
 You're using `WanVideoVAE38` which is correct for the **Wan 2.2 TI2V-5B** model you're working with.
 
 The original code you pasted earlier (from Alibaba's Wan repo) corresponds to the `Wan2_2_VAE` class which uses `WanVAE_` - this is **equivalent** to your `VideoVAE38_` in torchtitan. The naming is just different.
+
+---
+
+## Comprehensive TODO List for `add_validation` Branch
+
+### 1. Validation Implementation (Priority: High)
+
+- [ ] Complete the validation loop in [`validate.py:199`](./validate.py) - remove `NotImplementedError`
+- [ ] Add pipeline parallelism support for validation (currently not supported, see `validate.py:115`)
+- [ ] Implement validation loss computation for Wan model (sampling code for Wan)
+- [ ] Wire up `metrics_processor.log_validation()` properly
+- [ ] Test validation with different batch sizes and step counts
+
+### 2. Classifier-Free Guidance (Priority: Medium)
+
+- [ ] Implement CFG support in `generate_video()` function ([`sampling.py:96`](./inference/sampling.py))
+- [ ] Add empty T5 encoding handling for unconditional generation ([`sampling.py:112`](./inference/sampling.py))
+- [ ] Test CFG with different guidance scales (config: `classifier_free_guidance_scale`)
+
+### 3. VAE + FSDP Compatibility (Priority: High)
+
+- [ ] Fix cache mechanism that breaks with FSDP wrapping ([`parallelize.py:220`](./infra/parallelize.py))
+    - FSDP wrapping of `wan_video_vae` breaks the internal caching logic
+- [ ] Consider reimplementing the caching layer to be FSDP-compatible
+- [ ] Explore `torchao` as an alternative optimization approach
+- [ ] Test VAE encoding/decoding with and without FSDP
+
+### 4. torch.compile Support (Priority: Medium)
+
+- [ ] Fix VAE compatibility with `torch.compile` (currently breaks)
+- [ ] Test model compilation with `inductor` backend
+- [ ] Profile performance improvements with compilation enabled
+- [ ] Update `[compile]` config section documentation
+
+### 5. Code Cleanup
+
+- [ ] Handle precomputed embeddings better in [`train.py:131`](./train.py)
+    - Currently stored as class attributes, should be handled more cleanly
+- [ ] Remove deprecated `save_image` function from [`sampling.py:234`](./inference/sampling.py)
+- [ ] Fix tokenizer `_n_words` hardcoded value in [`tokenizer.py:93`](./tokenizer.py) - needs verification
+- [ ] Add validation code in [`train.py:196`](./train.py) for Wan model
+- [ ] Clean up DiT-related TODO in [`train.py:263`](./train.py)
+
+### 6. Data Pipeline
+
+- [ ] Fix dataloader `prefetch_factor`/`num_workers`/`persistent_workers` workaround ([`wan_datasets.py:503-504`](./wan_datasets.py))
+    - Current workaround sets `prefetch_factor = None` when `num_workers == 0`
+    - Need proper handling for test vs production configurations
+- [ ] Verify zero-copy behavior for video frames ([`wan_datasets.py:447`](./wan_datasets.py))
+
+### 7. Documentation
+
+- [ ] Update [`README.md`](./README.md) with validation usage and examples
+- [ ] Update config file documentation for `wan_cc1xm.toml` and `wan_1xwm.toml`
+- [ ] Add FLOPS calculation for Wan model ([`args.py:66`](./model/args.py))
+- [ ] Document the differences between `WanVideoVAE` and `WanVideoVAE38`
+
+### 8. Additional Parallelism
+
+- [ ] Add Tensor Parallelism support
+- [ ] Add Pipeline Parallelism support
+- [ ] Implement `num_flops_per_token` calculation in `get_nparams_and_flops()` function
+
+### 9. Inference Pipeline
+
+- [ ] Verify image resolution handling in [`sampling.py:91`](./inference/sampling.py)
+- [ ] Verify latent unpacking logic in [`sampling.py:226`](./inference/sampling.py)
+- [ ] Add more sampling schedulers (beyond flow matching)
