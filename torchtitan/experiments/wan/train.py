@@ -57,7 +57,6 @@ class WanTrainer(Trainer):
             self.parallel_dims,
             self.device,
             job_config.debug,
-            # distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
             distinct_seed_mesh_dims=["dp_replicate", "fsdp"],
         )
 
@@ -182,11 +181,7 @@ class WanTrainer(Trainer):
         self.t5_encoder = None
         # Also delete tokenizer as it's no longer needed
         del t5_tokenizer
-
-        logger.info("  ✓ Encoder and tokenizer deleted to free memory")
-        # else:
-        # logger.info("  - Keeping encoder (validation is enabled and may need it)")
-
+        
         if job_config.validation.enable:
             logger.info("Initializing Wan validator...")
             logger.info(f"t5_encoder is None {self.t5_encoder is None}")
