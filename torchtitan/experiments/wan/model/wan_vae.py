@@ -12,7 +12,7 @@ from torchtitan.experiments.wan.model.dataset import RawVideoDataset
 
 
 import os
-# from icecream import ic
+from icecream import ic
 
 # Configure icecream debug prints (works independently of logging level)
 # By default, icecream is enabled and outputs to stderr (works with 2>&1 redirection)
@@ -569,7 +569,7 @@ class DupUp3D(nn.Module):
 
 class Down_ResidualBlock(nn.Module):
     def __init__(
-        self, in_dim, out_dim, dropout, mult, temperal_downsample=False, down_flag=False
+        self, in_dim, out_dim, dropout, mult, temporal_downsample=False, down_flag=False
     ):
         super().__init__()
 
@@ -577,7 +577,7 @@ class Down_ResidualBlock(nn.Module):
         self.avg_shortcut = AvgDown3D(
             in_dim,
             out_dim,
-            factor_t=2 if temperal_downsample else 1,
+            factor_t=2 if temporal_downsample else 1,
             factor_s=2 if down_flag else 1,
         )
 
@@ -589,13 +589,14 @@ class Down_ResidualBlock(nn.Module):
 
         # Add the final downsample block
         if down_flag:
-            mode = "downsample3d" if temperal_downsample else "downsample2d"
+            mode = "downsample3d" if temporal_downsample else "downsample2d"
             downsamples.append(Resample38(out_dim, mode=mode))
 
         self.downsamples = nn.Sequential(*downsamples)
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         x_copy = x.clone()
+
         for module in self.downsamples:
             x = module(x, feat_cache, feat_idx)
 
@@ -604,7 +605,7 @@ class Down_ResidualBlock(nn.Module):
 
 class Up_ResidualBlock(nn.Module):
     def __init__(
-        self, in_dim, out_dim, dropout, mult, temperal_upsample=False, up_flag=False
+        self, in_dim, out_dim, dropout, mult, temporal_upsample=False, up_flag=False
     ):
         super().__init__()
         # Shortcut path with upsample
@@ -612,7 +613,7 @@ class Up_ResidualBlock(nn.Module):
             self.avg_shortcut = DupUp3D(
                 in_dim,
                 out_dim,
-                factor_t=2 if temperal_upsample else 1,
+                factor_t=2 if temporal_upsample else 1,
                 factor_s=2 if up_flag else 1,
             )
         else:
@@ -626,7 +627,7 @@ class Up_ResidualBlock(nn.Module):
 
         # Add the final upsample block
         if up_flag:
-            mode = "upsample3d" if temperal_upsample else "upsample2d"
+            mode = "upsample3d" if temporal_upsample else "upsample2d"
             upsamples.append(Resample38(out_dim, mode=mode))
 
         self.upsamples = nn.Sequential(*upsamples)
@@ -650,7 +651,7 @@ class Encoder3d(nn.Module):
         dim_mult=[1, 2, 4, 4],
         num_res_blocks=2,
         attn_scales=[],
-        temperal_downsample=[True, True, False],
+        temporal_downsample=[True, True, False],
         dropout=0.0,
     ):
         super().__init__()
@@ -659,7 +660,7 @@ class Encoder3d(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.temperal_downsample = temperal_downsample
+        self.temporal_downsample = temporal_downsample
 
         # dimensions
         dims = [dim * u for u in [1] + dim_mult]
@@ -680,7 +681,7 @@ class Encoder3d(nn.Module):
 
             # downsample block
             if i != len(dim_mult) - 1:
-                mode = "downsample3d" if temperal_downsample[i] else "downsample2d"
+                mode = "downsample3d" if temporal_downsample[i] else "downsample2d"
                 downsamples.append(Resample(out_dim, mode=mode))
                 scale /= 2.0
         self.downsamples = nn.Sequential(*downsamples)
@@ -764,7 +765,7 @@ class Encoder3d_38(nn.Module):
         dim_mult=[1, 2, 4, 4],
         num_res_blocks=2,
         attn_scales=[],
-        temperal_downsample=[False, True, True],
+        temporal_downsample=[False, True, True],
         dropout=0.0,
     ):
         super().__init__()
@@ -773,7 +774,7 @@ class Encoder3d_38(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.temperal_downsample = temperal_downsample
+        self.temporal_downsample = temporal_downsample
 
         # dimensions
         dims = [dim * u for u in [1] + dim_mult]
@@ -786,7 +787,7 @@ class Encoder3d_38(nn.Module):
         downsamples = []
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
             t_down_flag = (
-                temperal_downsample[i] if i < len(temperal_downsample) else False
+                temporal_downsample[i] if i < len(temporal_downsample) else False
             )
             downsamples.append(
                 Down_ResidualBlock(
@@ -794,7 +795,7 @@ class Encoder3d_38(nn.Module):
                     out_dim=out_dim,
                     dropout=dropout,
                     mult=num_res_blocks,
-                    temperal_downsample=t_down_flag,
+                    temporal_downsample=t_down_flag,
                     down_flag=i != len(dim_mult) - 1,
                 )
             )
@@ -879,7 +880,7 @@ class Decoder3d(nn.Module):
         dim_mult=[1, 2, 4, 4],
         num_res_blocks=2,
         attn_scales=[],
-        temperal_upsample=[False, True, True],
+        temporal_upsample=[False, True, True],
         dropout=0.0,
     ):
         super().__init__()
@@ -888,7 +889,7 @@ class Decoder3d(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.temperal_upsample = temperal_upsample
+        self.temporal_upsample = temporal_upsample
 
         # dimensions
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
@@ -918,7 +919,7 @@ class Decoder3d(nn.Module):
 
             # upsample block
             if i != len(dim_mult) - 1:
-                mode = "upsample3d" if temperal_upsample[i] else "upsample2d"
+                mode = "upsample3d" if temporal_upsample[i] else "upsample2d"
                 upsamples.append(Resample(out_dim, mode=mode))
                 scale *= 2.0
         self.upsamples = nn.Sequential(*upsamples)
@@ -996,7 +997,7 @@ class Decoder3d_38(nn.Module):
         dim_mult=[1, 2, 4, 4],
         num_res_blocks=2,
         attn_scales=[],
-        temperal_upsample=[False, True, True],
+        temporal_upsample=[False, True, True],
         dropout=0.0,
     ):
         super().__init__()
@@ -1005,7 +1006,7 @@ class Decoder3d_38(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.temperal_upsample = temperal_upsample
+        self.temporal_upsample = temporal_upsample
 
         # dimensions
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
@@ -1023,14 +1024,14 @@ class Decoder3d_38(nn.Module):
         # upsample blocks
         upsamples = []
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            t_up_flag = temperal_upsample[i] if i < len(temperal_upsample) else False
+            t_up_flag = temporal_upsample[i] if i < len(temporal_upsample) else False
             upsamples.append(
                 Up_ResidualBlock(
                     in_dim=in_dim,
                     out_dim=out_dim,
                     dropout=dropout,
                     mult=num_res_blocks + 1,
-                    temperal_upsample=t_up_flag,
+                    temporal_upsample=t_up_flag,
                     up_flag=i != len(dim_mult) - 1,
                 )
             )
@@ -1113,7 +1114,7 @@ class VideoVAE_(nn.Module):
         dim_mult=[1, 2, 4, 4],
         num_res_blocks=2,
         attn_scales=[],
-        temperal_downsample=[False, True, True],
+        temporal_downsample=[False, True, True],
         dropout=0.0,
     ):
         super().__init__()
@@ -1122,8 +1123,8 @@ class VideoVAE_(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.temperal_downsample = temperal_downsample
-        self.temperal_upsample = temperal_downsample[::-1]
+        self.temporal_downsample = temporal_downsample
+        self.temporal_upsample = temporal_downsample[::-1]
 
         # modules
         self.encoder = Encoder3d(
@@ -1132,7 +1133,7 @@ class VideoVAE_(nn.Module):
             dim_mult,
             num_res_blocks,
             attn_scales,
-            self.temperal_downsample,
+            self.temporal_downsample,
             dropout,
         )
         self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
@@ -1143,7 +1144,7 @@ class VideoVAE_(nn.Module):
             dim_mult,
             num_res_blocks,
             attn_scales,
-            self.temperal_upsample,
+            self.temporal_upsample,
             dropout,
         )
 
@@ -1348,9 +1349,10 @@ class WanVideoVAE(nn.Module):
             hidden_states_batch = hidden_states[:, :, :, h:h_, w:w_].to(
                 computation_device
             )
-            hidden_states_batch = self.model.decode(hidden_states_batch, self.scale).to(
-                dtype=output_dtype, device=data_device
-            )
+            with torch.no_grad():
+                hidden_states_batch = self.model.decode(
+                    hidden_states_batch, self.scale
+                ).to(dtype=output_dtype, device=data_device)
 
             mask = self.build_mask(
                 hidden_states_batch,
@@ -1422,9 +1424,10 @@ class WanVideoVAE(nn.Module):
 
         for h, h_, w, w_ in tasks:
             hidden_states_batch = video[:, :, :, h:h_, w:w_].to(computation_device)
-            hidden_states_batch = self.model.encode(hidden_states_batch, self.scale).to(
-                dtype=output_dtype, device=data_device
-            )
+            with torch.no_grad():
+                hidden_states_batch = self.model.encode(
+                    hidden_states_batch, self.scale
+                ).to(dtype=output_dtype, device=data_device)
 
             mask = self.build_mask(
                 hidden_states_batch,
@@ -1456,15 +1459,17 @@ class WanVideoVAE(nn.Module):
 
     def single_encode(self, video, device):
         video = video.to(device)
-        x = self.model.encode(video, self.scale)
+        with torch.no_grad():
+            x = self.model.encode(video, self.scale)
         # Convert to VAE's dtype (typically bfloat16)
         x = x.to(dtype=self.torch_dtype)
         return x
 
     def single_decode(self, hidden_state, device):
         hidden_state = hidden_state.to(device)
-        video = self.model.decode(hidden_state, self.scale)
-        video = video.clamp_(-1, 1)
+        with torch.no_grad():
+            video = self.model.decode(hidden_state, self.scale)
+            video = video.clamp_(-1, 1)
         # Convert to VAE's dtype (typically bfloat16)
         video = video.to(dtype=self.torch_dtype)
         return video
@@ -1624,7 +1629,7 @@ class VideoVAE38_(VideoVAE_):
         dim_mult=[1, 2, 4, 4],
         num_res_blocks=2,
         attn_scales=[],
-        temperal_downsample=[False, True, True],
+        temporal_downsample=[False, True, True],
         dropout=0.0,
     ):
         super(VideoVAE_, self).__init__()
@@ -1633,8 +1638,8 @@ class VideoVAE38_(VideoVAE_):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.temperal_downsample = temperal_downsample
-        self.temperal_upsample = temperal_downsample[::-1]
+        self.temporal_downsample = temporal_downsample
+        self.temporal_upsample = temporal_downsample[::-1]
 
         # modules
         self.encoder = Encoder3d_38(
@@ -1643,7 +1648,7 @@ class VideoVAE38_(VideoVAE_):
             dim_mult,
             num_res_blocks,
             attn_scales,
-            self.temperal_downsample,
+            self.temporal_downsample,
             dropout,
         )
         self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
@@ -1654,7 +1659,7 @@ class VideoVAE38_(VideoVAE_):
             dim_mult,
             num_res_blocks,
             attn_scales,
-            self.temperal_upsample,
+            self.temporal_upsample,
             dropout,
         )
 
@@ -2058,7 +2063,7 @@ def load_wan_vae(
 
 def main():
     from torch.utils.data import DataLoader
-    from icecream import ic 
+    from icecream import ic
 
     init_logger()
     logger.info("Starting main function")
@@ -2076,27 +2081,20 @@ def main():
         robot_temporal_mode="downsampled",
     )
     dataloader = DataLoader(
-        dataset,
-        shuffle=False,
-        batch_size=4,
-        drop_last=True,
-        num_workers=1
+        dataset, shuffle=False, batch_size=4, drop_last=True, num_workers=1
     )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     n_batches = 1
 
     for i, batch in enumerate(dataloader):
-        if n_batches == i: 
+        if n_batches == i:
             break
         input_video, robot_states = batch
         input_video = input_video.to(device, dtype=torch.bfloat16)
         robot_states = robot_states.to(device, dtype=torch.bfloat16)
-        ic(input_video.shape)
-        ic(robot_states.shape)
 
         input_video = input_video.permute(0, 1, 4, 2, 3)
-        ic("after permute", input_video.shape)
 
         # Normalize video frames between -1 and 1 (from [0, 255] range)
         # This is required because the VAE expects input in [-1, 1] range

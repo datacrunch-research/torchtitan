@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
-import sys
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -42,18 +41,18 @@ def parallelize_wan(
     checkpointing, compile, etc.). Weight initialization is handled separately in train.py
     after parallelization, which allows weights to be loaded into FSDP-wrapped models using
     PyTorch's distributed checkpoint APIs.
-    
+
     Args:
         model: The model to parallelize (on meta device)
         parallel_dims: Parallelism dimensions
         job_config: Job configuration
         *args: Extra positional arguments (for compatibility, unused)
         **kwargs: Extra keyword arguments (for compatibility, unused)
-    
+
     Returns:
         The parallelized model (still on meta device, weights not initialized)
     """
-    
+
     # Apply activation checkpointing if enabled
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
@@ -65,22 +64,22 @@ def parallelize_wan(
         logger.info("  [parallelize_wan] Applying torch.compile to model...")
         logger.info(f"    - Backend: {job_config.compile.backend}")
         logger.info(f"    - Components: {job_config.compile.components}")
-        sys.stdout.flush()
         apply_compile(model, job_config.compile)
         logger.info("  [parallelize_wan] ✓ Model compilation completed")
-        sys.stdout.flush()
 
     if parallel_dims.fsdp_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
 
-        logger.info("  [parallelize_wan] Applying FSDP wrapping (this may take a minute)...")
-        sys.stdout.flush()
+        logger.info(
+            "  [parallelize_wan] Applying FSDP wrapping (this may take a minute)..."
+        )
+
         apply_fsdp(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             cpu_offload=job_config.training.enable_cpu_offload,
@@ -90,7 +89,6 @@ def parallelize_wan(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-        sys.stdout.flush()
 
         if parallel_dims.cp_enabled:
             # The attention in Flux does not use causal mask.
@@ -160,11 +158,11 @@ def apply_ac(model: nn.Module, ac_config):
 def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     Apply torch.compile to the Wan model.
-    
+
     For Wan models, we compile each transformer block individually for efficiency,
     similar to how other models handle compilation. This allows for better optimization
     of the repeated transformer structure.
-    
+
     Args:
         model: The WanModel to compile
         compile_config: Compile configuration from job_config
@@ -180,7 +178,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
         )
         model.blocks.register_module(layer_id, compiled_block)
         compiled_blocks += 1
-    
+
     logger.info(
         f"Compiled {compiled_blocks} transformer blocks with torch.compile "
         f"(backend: {compile_config.backend})"
@@ -193,44 +191,36 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard")
-        else:
-            dp_mesh_dim_names = ("dp_shard",)
+    # apply FSDP or HSDP
+    if parallel_dims.dp_shard_enabled:
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
-        fsdp_config = {
-            "mesh": parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+        dp_mesh = parallel_dims.get_mesh(names)
+        fsdp_config: dict[str, Any] = {
+            "mesh": dp_mesh,
             "mp_policy": mp_policy,
         }
+
         if job_config.training.enable_cpu_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
         # Apply FSDP to the T5 encoder
+        # pyrefly: ignore [missing-attribute]
         for block in t5_model.hf_module.encoder.block:
             fully_shard(block, **fsdp_config)
+
         fully_shard(t5_model.hf_module, **fsdp_config)
 
-        # Apply FSDP to the Wan Video VAE if provided
-        # The VAE is large enough (z_dim=48, dim=160) to benefit from FSDP
-        if wan_video_vae is not None:
-            # Apply FSDP to the VAE model (encoder and decoder)
-            if hasattr(wan_video_vae, 'model'):
-                # WanVideoVAE38 wraps the model in self.model
-                fully_shard(wan_video_vae.model.encoder, **fsdp_config)
-                fully_shard(wan_video_vae.model.decoder, **fsdp_config)
-                # Also wrap the conv layers
-                fully_shard(wan_video_vae.model.conv1, **fsdp_config)
-                fully_shard(wan_video_vae.model.conv2, **fsdp_config)
-                logger.info("Applied FSDP to the Wan Video VAE")
-            else:
-                # Fallback: wrap the entire VAE
-                fully_shard(wan_video_vae, **fsdp_config)
-                logger.info("Applied FSDP to the Wan Video VAE (full model)")
+        # TODO: wrapping with FSDP the wan_video_vae introduces problem with how the cache is handled. Are there better way to
+        # fully_shard(wan_video_vae.model.encoder, **fsdp_config)
+        # fully_shard(wan_video_vae.model.decoder, **fsdp_config)
+        # fully_shard(wan_video_vae.model, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the T5 encoder model")

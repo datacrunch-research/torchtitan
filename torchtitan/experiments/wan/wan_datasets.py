@@ -4,30 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import itertools
 import math
-from functools import partial
 from typing import Any, Callable, Optional
 
-import json
-import pathlib
 import numpy as np
 import PIL
 
 import torch
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
+# from datasets import Dataset, load_dataset
+# from datasets.distributed import split_dataset_by_node
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 import pickle
-from typing import Any
+# from typing import Any
 
 from torchtitan.components.dataloader import BaseDataLoader
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Job, JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer, WanTokenizer
 from torchtitan.tools.logging import logger
@@ -556,7 +552,8 @@ def build_wan_validation_dataloader(
     num_workers = job_config.training.num_workers
     persistent_workers = job_config.training.persistent_workers
     pin_memory = job_config.training.pin_memory
-    prefetch_factor = job_config.training.prefetch_factor
+    # prefetch_factor must be None when num_workers=0 (single-process loading)
+    prefetch_factor = job_config.training.prefetch_factor if num_workers > 0 else None
 
     t5_tokenizer = build_wan_tokenizer(job_config)
 
