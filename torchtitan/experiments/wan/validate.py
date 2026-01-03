@@ -340,13 +340,15 @@ if __name__ == "__main__":
     from torchtitan.config.manager import ConfigManager
     from torchtitan.experiments.wan.model.wan_vae import load_wan_vae
     from torchtitan.experiments.wan import wan_configs
-    from icecream import ic
+    # from icecream import ic
+    from PIL import Image
+    from datetime import datetime
+    import random
+    import numpy as np
 
     # Initialize logger for standalone execution
     init_logger()
-    logger.info("=" * 80)
     logger.info("Starting WanValidator test script")
-    logger.info("=" * 80)
     
     # Parse config from CLI arguments (passed via torchrun or command line)
     # Usage: torchrun ... -m torchtitan.experiments.wan.validate --job.config_file=<path>
@@ -354,12 +356,46 @@ if __name__ == "__main__":
     job_config = config_manager.parse_args()  # Uses sys.argv automatically
     logger.info(f"Config loaded from: {job_config.job.config_file}")
     logger.info("Config loaded successfully")
-    ic(job_config)
+    # ic(job_config)
     
     # Get device and dtype
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     logger.info(f"Using device: {device}, dtype: {dtype}")
+    
+    # Create ParallelDims from config (same pattern as train.py)
+    # For standalone execution, world_size is always 1 (single process)
+    parallelism_config = job_config.parallelism
+    world_size = 1  # Standalone script runs as single process
+    
+    # Use parallelism settings from config
+    # Note: For standalone execution, all parallelism degrees should be 1
+    # to match world_size=1. ParallelDims validation will enforce this.
+    parallel_dims = ParallelDims(
+        dp_shard=parallelism_config.data_parallel_shard_degree if parallelism_config.data_parallel_shard_degree > 0 else 1,
+        dp_replicate=parallelism_config.data_parallel_replicate_degree,
+        cp=parallelism_config.context_parallel_degree,
+        tp=parallelism_config.tensor_parallel_degree,
+        pp=parallelism_config.pipeline_parallel_degree,
+        ep=parallelism_config.expert_parallel_degree,
+        etp=parallelism_config.expert_tensor_parallel_degree,
+        world_size=world_size,
+    )
+    
+    # Set random seeds for reproducibility using the same utility as train.py
+    # This ensures consistency with training pipeline
+    logger.info("Setting random seed for reproducibility...")
+    dist_utils.set_determinism(
+        parallel_dims=parallel_dims,
+        device=device,
+        debug_config=job_config.debug,
+        distinct_seed_mesh_dims=[],  # No distinct seeds needed for single-process
+    )
+    
+    # Set additional seeds for complete reproducibility (not handled by set_determinism for single-process)
+    seed = job_config.debug.seed if hasattr(job_config.debug, 'seed') and job_config.debug.seed is not None else 42
+    random.seed(seed)
+    np.random.seed(seed)
     
     # Build tokenizer
     logger.info("Building tokenizer...")
@@ -373,26 +409,17 @@ if __name__ == "__main__":
         dp_world_size=1,
         dp_rank=0,
         tokenizer=tokenizer,
-        parallel_dims=ParallelDims(
-            dp_replicate=1,
-            dp_shard=1,  # No sharding for single-device test
-            cp=1,
-            tp=1,
-            pp=1,
-            ep=1,  # Expert parallelism
-            etp=1,  # Expert tensor parallelism
-            world_size=1,
-        ),
+        parallel_dims=parallel_dims,
         loss_fn=None,  # Not needed for dataloader test
         validation_context=None,
         maybe_enable_amp=None,
     )
     logger.info("Validator built successfully")
-    ic(validator)
+    # ic(validator)
 
     # Get model args for VAE params
     model_args = wan_configs[job_config.model.flavor]
-    ic(model_args)
+    # ic(model_args)
     
     
     logger.info(f"Loading VAE from: {job_config.encoder.wan_vae_path}")
@@ -421,34 +448,46 @@ if __name__ == "__main__":
     logger.info("Validator initialized with encoders")
     
     # Test the dataloader by iterating through a few batches
-    logger.info("=" * 80)
     logger.info("Testing validation dataloader...")
-    logger.info("=" * 80)
     
     num_batches_to_test = 3
     for batch_idx, (input_dict, labels) in enumerate(validator.validation_dataloader):
         if batch_idx >= num_batches_to_test:
             break
-        ic(input_dict.keys())
-        ic(input_dict["video_frames"].shape)
-        ic(labels.shape)
+        # ic(input_dict.keys())
+        # ic(input_dict["video_frames"].shape)
+        # ic(labels.shape)
         assert torch.all(input_dict["video_frames"] == labels)
-        video_frames = input_dict["video_frames"]
-        video_frames = video_frames.to(device=device, dtype=dtype).permute(0, 4, 1, 2, 3)
-        ic(video_frames.type(), video_frames.device)
-        ic(video_frames.shape)
         with torch.inference_mode():
-            latents = wan_video_vae.encode(videos=video_frames, device=device, tiled=True)
-            ic(latents.shape)
+            processed = preprocess_data(
+                device=device,
+                dtype=dtype,
+                wan_video_vae=wan_video_vae,
+                t5_encoder=t5_encoder,
+                batch=input_dict,
+                precomputed_t5_embedding=None,
+            )
+            latents = processed["latents"]
+            # ic(latents.shape)
             latentes = latents.permute(0, 2, 1, 3, 4)
-            ic(latentes.shape)
+            # ic(latentes.shape)
             # TODO: fix the tiled execution path 
             reconstructed_video = wan_video_vae.decode(hidden_states=latents, device=device, tiled=False)
         reconstructed_video = reconstructed_video.clamp(-1.0, 1.0)
         
+        # Get normalized video frames for PSNR comparison
+        # preprocess_data normalizes and converts to (B, C, T, H, W) format
+        # We need to reconstruct this from the original input to compare
+        video_frames_original = input_dict["video_frames"]
+        # Normalize and convert to same format as preprocess_data output
+        video_frames = video_frames_original.float()  # Convert uint8 to float
+        video_frames = (video_frames / 127.5) - 1.0  # Normalize [0, 255] -> [-1, 1]
+        video_frames = video_frames.to(device=device, dtype=dtype)
+        video_frames = video_frames.permute(0, 4, 1, 2, 3)  # (B, T, H, W, C) -> (B, C, T, H, W)
+        
         # Convert back to same dtype as original for PSNR calculation
         # Both should be float32 for accurate PSNR calculation
-        video_frames_cpu =  video_frames.cpu().float()
+        video_frames_cpu = video_frames.cpu().float()
         reconstructed_cpu = reconstructed_video.cpu().float()
         
         # Calculate PSNR per frame
@@ -456,7 +495,7 @@ if __name__ == "__main__":
         B, C, T, H, W = video_frames_cpu.shape
         psnr_values = []
         
-        logger.info(f"\nCalculating PSNR for {T} frames...")
+        # logger.info(f"\nCalculating PSNR for {T} frames...")
         for t in range(T):
             # Extract frame t: (B, C, H, W)
             original_frame = video_frames_cpu[:, :, t, :, :]  # (B, C, H, W)
@@ -486,34 +525,25 @@ if __name__ == "__main__":
         
         # psnr_values shape: (B, T) - PSNR for each batch and frame
         logger.info("\nPSNR Results:")
-        logger.info(f"  - PSNR shape: {psnr_values.shape}")
-        logger.info(f"  - PSNR per frame (mean across batch): {psnr_values.mean(dim=0)}")
-        logger.info(f"  - PSNR per batch (mean across frames): {psnr_values.mean(dim=1)}")
         logger.info(f"  - Overall PSNR (mean): {psnr_values.mean().item():.4f} dB")
         logger.info(f"  - PSNR min: {psnr_values.min().item():.4f} dB")
         logger.info(f"  - PSNR max: {psnr_values.max().item():.4f} dB")
         
         # This PSNR represents the upper bound - best possible reconstruction
         # Any model-generated video should have PSNR <= this value
-        logger.info("\n" + "=" * 80)
         logger.info("VAE PSNR Test Summary:")
         logger.info(f"  - This PSNR ({psnr_values.mean().item():.4f} dB) is the UPPER BOUND")
         logger.info("  - Model-generated videos should have PSNR <= this value")
         logger.info("  - Higher PSNR = better reconstruction quality")
-        logger.info("=" * 80)
         # Save frames with highest and lowest PSNR for each video in batch
-        logger.info("\n" + "=" * 80)
         logger.info("Saving frames with highest and lowest PSNR...")
-        logger.info("=" * 80)
         
-        from PIL import Image
-        from datetime import datetime
-        import secrets
+
         
         # Generate timestamp and random string for folder name
         # Format: YYYYMMDD_HHMMSS_randomstring
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        random_str = secrets.token_hex(4)  # 8 character random hex string
+        random_str = random.randint(0, 1000000)  # 8 character random hex string
         folder_name = f"{timestamp}_{random_str}_vae_psnr_frames"
         
         # Get logs directory from job config or use default
@@ -522,7 +552,7 @@ if __name__ == "__main__":
             folder_name
         )
         os.makedirs(logs_dir, exist_ok=True)
-        logger.info(f"Saving frames to: {logs_dir}")
+        # logger.info(f"Saving frames to: {logs_dir}")
         
         # psnr_values shape: (B, T) - PSNR for each batch and frame
         for b in range(B):
@@ -536,9 +566,9 @@ if __name__ == "__main__":
             max_psnr_value = video_psnr[max_psnr_idx].item()
             min_psnr_value = video_psnr[min_psnr_idx].item()
             
-            logger.info(f"\nVideo {b}:")
-            logger.info(f"  - Highest PSNR: frame {max_psnr_idx}, value: {max_psnr_value:.4f} dB")
-            logger.info(f"  - Lowest PSNR: frame {min_psnr_idx}, value: {min_psnr_value:.4f} dB")
+            # logger.info(f"\nVideo {b}:")
+            # logger.info(f"  - Highest PSNR: frame {max_psnr_idx}, value: {max_psnr_value:.4f} dB")
+            # logger.info(f"  - Lowest PSNR: frame {min_psnr_idx}, value: {min_psnr_value:.4f} dB")
             
             # Extract frames from original and reconstructed videos
             # Both are in (B, C, T, H, W) format
@@ -593,7 +623,7 @@ if __name__ == "__main__":
             
             original_max_img.save(original_max_path)
             reconstructed_max_img.save(reconstructed_max_path)
-            logger.info(f"  - Saved max PSNR frames: {original_max_path}, {reconstructed_max_path}")
+            # logger.info(f"  - Saved max PSNR frames: {original_max_path}, {reconstructed_max_path}")
             
             # Save lowest PSNR frames
             original_min_img = tensor_to_pil(original_min_frame_hwc)
@@ -610,10 +640,9 @@ if __name__ == "__main__":
             
             original_min_img.save(original_min_path)
             reconstructed_min_img.save(reconstructed_min_path)
-            logger.info(f"  - Saved min PSNR frames: {original_min_path}, {reconstructed_min_path}")
+            # logger.info(f"  - Saved min PSNR frames: {original_min_path}, {reconstructed_min_path}")
         
         logger.info(f"\n✓ All frames saved to: {logs_dir}")
-        logger.info("=" * 80)
         
     # Optionally test preprocessing
     logger.info("\nTesting data preprocessing...")
@@ -635,7 +664,7 @@ if __name__ == "__main__":
             batch=input_dict,
             precomputed_t5_embedding=None,
         )
-        ic(processed.keys())
-        ic(processed["latents"].shape)
-        ic(processed["t5_encodings"].shape)
+        # ic(processed.keys())
+        # ic(processed["latents"].shape)
+        # ic(processed["t5_encodings"].shape)
         

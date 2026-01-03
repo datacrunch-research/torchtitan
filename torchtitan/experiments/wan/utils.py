@@ -78,52 +78,27 @@ def preprocess_data(
                 "T5 encoder is required but was deleted. Precomputed embeddings are not available."
             )
         t5_text_encodings = t5_encoder(t5_tokens)
-
-    # Move videos to GPU first, then convert dtype on GPU
-    # Videos come from dataloader as (batch_size, num_frames, height, width, channels)
-    # Original dtype is typically uint8 (from numpy/decord), converting to target dtype (bfloat16) on GPU
-    video_frames_input = batch["video_frames"]
-    # logger.info(
-    #     f"Video processing: {video_frames_input.dtype} -> {dtype}, "
-    #     f"shape: {video_frames_input.shape}, device: {video_frames_input.device} -> {device}"
-    # )
     
     # First move to GPU (keeping original dtype to minimize CPU-GPU transfer)
     # Then convert dtype on GPU for better performance
-    videos = batch["video_frames"].to(device=device)
-    # logger.info(f"  - Moved to {device}, dtype: {videos.dtype}")
-    
-    # Convert dtype on GPU (more efficient than converting on CPU then moving)
-    videos = videos.to(dtype=dtype)
-    # logger.info(f"  ✓ Converted to {dtype} on {device}, shape: {videos.shape}")
-    
+    videos = batch["video_frames"].to(
+        device=device, dtype=dtype
+    )
     # Permute from (B, T, H, W, C) to (B, T, C, H, W)
     videos = videos.permute(0, 1, 4, 2, 3)
-    # logger.info(f"  - Permuted to (B, T, C, H, W): {videos.shape}")
-    
     # Normalize video frames from [0, 255] range to [-1, 1] range
-    # This is required because the VAE expects input in [-1, 1] range
-    # logger.info("  - Normalizing video frames from [0, 255] to [-1, 1] range...")
     max_value = 1.0
     min_value = -1.0
     videos = videos * ((max_value - min_value) / 255.0) + min_value
-    # logger.info(f"  ✓ Normalized, value range: [{videos.min().item():.3f}, {videos.max().item():.3f}]")
-    # Transpose from (B, T, C, H, W) to (B, C, T, H, W) for VAE encoding
-    # The VAE encode method expects a batched tensor of shape (B, C, T, H, W)
     videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
     
-    # Encode videos to latents using the WAN Video VAE
-    # The encode method processes the entire batch at once for better performance
     video_latents = wan_video_vae.encode(
         videos,  # Batched tensor (B, C, T, H, W)
         device=device,
         tiled=False,
     )
-    logger.info(f"Video latents shape: {video_latents.shape}")
     batch["latents"] = video_latents.to(device=device, dtype=dtype)
-
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
-
     return batch
 
 
