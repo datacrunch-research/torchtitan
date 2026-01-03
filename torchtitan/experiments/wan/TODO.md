@@ -1,5 +1,10 @@
 # Custom TorchTitan Wan 2.2 TI2V-5B model
 
+Run the debug script for validation: 
+```bash
+torchrun --nproc_per_node=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3 --log-dir=./logs/debug -m torchtitan.experiments.wan.validate --job.config_file=./torchtitan/experiments/wan/train_configs/validate.toml
+```
+
 Run the train w/:
 ```bash
 torchrun --nproc_per_node=4 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3 --log-dir=./logs/debug -m torchtitan.experiments.wan.train --job.config_file=./torchtitan/experiments/wan/train_configs/wan_1xwm.toml

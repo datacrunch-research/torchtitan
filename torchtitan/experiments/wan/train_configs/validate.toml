@@ -1,0 +1,96 @@
+[job]
+dump_folder = "./outputs"
+description = "Wan debug model"
+custom_config_module = "torchtitan.experiments.wan.job_config"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "wan"
+flavor = "wan-video"
+
+[optimizer]
+name = "AdamW"
+lr = 1e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.0  # no decay
+
+[training]
+local_batch_size = 2
+max_norm = 1.0  # grad norm clipping
+steps = 30_000
+dataset = "1xwm"
+dataset_path = "./dataset/world_model_raw_data/train_v2.0_raw"
+downsampled = 4  # Downsampling factor: 1, 2, or 4
+clip_length = 77  # Number of frames per clip
+window_size = 8  # Window size for sampling clips
+robot_temporal_mode = "downsample"  # How to handle robot state temporal alignment
+classifier_free_guidance_prob = 0.447
+img_size = 512
+num_workers = 0 # Use 0 for testing to avoid worker issues
+persistent_workers = false
+pin_memory = false
+# prefetch_factor not needed when num_workers = 0
+test_mode = true  # Use random initialization for testing without pretrained weights
+
+[encoder]
+t5_encoder = "google/t5-v1_1-xxl"
+max_t5_encoding_len = 256
+wan_vae_path = "assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+# NOTE: Using "aot_eager" backend instead of "inductor" due to Triton compatibility issues with GB300
+# GB300 has compute capability 10.3 (SM 103), but Triton generates sm_103a which ptxas doesn't recognize
+# The "aot_eager" backend avoids Triton and should work on GB300, though performance may be lower than inductor
+# Once Triton/PyTorch adds proper GB300 (sm_103) support, switch back to backend = "inductor" for best performance
+enable = false
+components = ["model", "loss"]  # Compile both model and loss function
+backend = "inductor"  # Use aot_eager backend (no Triton) to avoid sm_103a compilation errors
+
+[checkpoint]
+enable = true
+folder = "checkpoint"
+interval = 100
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[validation]
+enable = true
+dataset = "1xwm"  # Can use same dataset for validation
+dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"  # Validation dataset path
+local_batch_size = 1
+steps = 6   # Recommended value with the current settings and world_size=8
+freq = 1
+enable_classifier_free_guidance = false
+num_cond_frames = 5
+classifier_free_guidance_scale = 5.0
+denoising_steps = 50
+save_img_count = 50
+save_img_folder = "img"
+all_timesteps = false
+
+[debug]
+seed = 36
