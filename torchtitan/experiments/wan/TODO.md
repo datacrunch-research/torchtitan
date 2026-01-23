@@ -1,6 +1,6 @@
 # Custom TorchTitan Wan 2.2 TI2V-5B model
 
-Run the debug script for validation: 
+Run the debug script for validation:
 ```bash
 torchrun --nproc_per_node=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3 --log-dir=./logs/debug -m torchtitan.experiments.wan.validate --job.config_file=./torchtitan/experiments/wan/train_configs/validate.toml
 ```
@@ -47,7 +47,7 @@ What TorchTitan people had for FLUX.1:
     - Need to add proper code to pass the correct `prefetch_factor`/`num_workers`/`persistent_workers` values when testing
     - This workaround is needed because the `dataset_wan` test fails without it
 
---- 
+---
 `WanVAE2.2` or `WanVAE38`
 The "38" suffix refers to the **Wan 2.2 VAE** variant, which is different from the original Wan VAE:
 
