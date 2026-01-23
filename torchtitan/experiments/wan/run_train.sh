@@ -24,4 +24,3 @@ torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost
 -m torchtitan.experiments.wan.train \
 --job.config_file ${CONFIG_FILE} "$@"
 # --job.custom_config_module ${CONFIG_FILE} "$@"
-

@@ -8,20 +8,18 @@ import unittest
 
 import torch
 
-from datasets import load_dataset
-
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
 
 
 class TestWanDataLoader(unittest.TestCase):
     def setUp(self):
-    
+
         # Import here to avoid circular import during test collection
         from torchtitan.experiments.wan.wan_datasets import (
-            DATASETS,
             _load_raw_video_dataset,
-            _process_raw_video_sample   
+            _process_raw_video_sample,
+            DATASETS,
         )
 
         # Store reference for use in tearDown
@@ -96,7 +94,7 @@ class TestWanDataLoader(unittest.TestCase):
 
                 for i in range(0, num_steps):
                     input_data, videos = next(it)
-                    
+
                     # Extract robot_states from input_data
                     states = input_data["robot_states"]
 

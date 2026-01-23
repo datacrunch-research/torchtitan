@@ -17,12 +17,14 @@ from torch import Tensor
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-
-from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
+from torchtitan.experiments.wan.inference.flow_match_scheduler import FlowMatchScheduler
+from torchtitan.experiments.wan.inference.fm_solvers_unipc import (
+    FlowUniPCMultistepScheduler,
+)
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.model.model import WanModel
-from torchtitan.experiments.wan.inference.flow_match_scheduler import FlowMatchScheduler
-from torchtitan.experiments.wan.inference.fm_solvers_unipc import FlowUniPCMultistepScheduler
+
+from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
 from torchtitan.experiments.wan.utils import (
     # create_position_encoding_for_latents,
     generate_noise_latent,
@@ -30,6 +32,7 @@ from torchtitan.experiments.wan.utils import (
     preprocess_data,
     # unpack_latents,
 )
+
 # from torchtitan.tools.logging import logger
 
 
@@ -67,7 +70,6 @@ def get_schedule(
         timesteps = time_shift(mu, 1.0, timesteps)
 
     return timesteps.tolist()
-
 
 
 # ----------------------------------------
@@ -128,7 +130,8 @@ def generate_video(
     num_inference_steps = job_config.validation.denoising_steps
     num_cond_frames = input_dict["num_cond_frames"]
 
-    # logger.info(f"Generating video with {num_inference_steps} steps, CFG={cfg_scale if enable_classifier_free_guidance else 'disabled'}")
+    # cfg_str = cfg_scale if enable_classifier_free_guidance else 'disabled'
+    # logger.info(f"Generating video with {num_inference_steps} steps, CFG={cfg_str}")
 
     # Preprocess data: encode video frames and get text embeddings
     batch = preprocess_data(
@@ -198,7 +201,7 @@ def denoise(
     num_frames: int,
     upsampling_factor: int,
     sigma_shift: float = 5.0,
-    sample_solver: str = 'unipc',
+    sample_solver: str = "unipc",
     t5_encodings_null: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
@@ -240,7 +243,7 @@ def denoise(
     bsz = video_latents.shape[0]
 
     # Initialize scheduler
-    if sample_solver == 'unipc':
+    if sample_solver == "unipc":
         # Use UniPC scheduler (same as original Wan2.2) for better quality
         scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=1000,
@@ -267,7 +270,7 @@ def denoise(
         width=width,
         device=device,
         dtype=dtype,
-        z_dim=z_dim
+        z_dim=z_dim,
     )
 
     # Calculate number of conditioning latent frames
@@ -299,11 +302,17 @@ def denoise(
     # mask[:, :, :num_cond_latents] = 0, rest = 1
     # After spatial downsampling by 2 (patch_size), we get per-patch timesteps
     # Take first channel of mask, downsample spatially by 2
-    latent_t, latent_h, latent_w = video_latents.shape[2], video_latents.shape[3], video_latents.shape[4]
+    latent_t, latent_h, latent_w = (
+        video_latents.shape[2],
+        video_latents.shape[3],
+        video_latents.shape[4],
+    )
     seq_len = latent_t * (latent_h // 2) * (latent_w // 2)
 
     # Create mask for per-token timesteps: shape [T, H//2, W//2]
-    ts_mask = torch.ones(latent_t, latent_h // 2, latent_w // 2, device=device, dtype=dtype)
+    ts_mask = torch.ones(
+        latent_t, latent_h // 2, latent_w // 2, device=device, dtype=dtype
+    )
     ts_mask[:num_cond_latents, :, :] = 0.0
 
     # Denoising loop
@@ -313,10 +322,12 @@ def denoise(
         per_token_ts = (ts_mask * timestep).flatten()  # [seq_len]
         # Pad if needed
         if per_token_ts.size(0) < seq_len:
-            per_token_ts = torch.cat([
-                per_token_ts,
-                per_token_ts.new_ones(seq_len - per_token_ts.size(0)) * timestep
-            ])
+            per_token_ts = torch.cat(
+                [
+                    per_token_ts,
+                    per_token_ts.new_ones(seq_len - per_token_ts.size(0)) * timestep,
+                ]
+            )
         per_token_ts = per_token_ts.unsqueeze(0).expand(bsz, -1)  # [B, seq_len]
 
         # Forward pass - conditional
@@ -333,7 +344,9 @@ def denoise(
         if cfg_scale != 1.0:
             # Use negative prompt embedding for unconditional pass (like Wan2.2)
             # If no negative prompt provided, fall back to same embeddings
-            context_uncond = t5_encodings_null if t5_encodings_null is not None else t5_encodings
+            context_uncond = (
+                t5_encodings_null if t5_encodings_null is not None else t5_encodings
+            )
             noise_pred_uncond = model(
                 x=latents,
                 timesteps=per_token_ts,  # Use same per-token timesteps
@@ -342,12 +355,14 @@ def denoise(
                 num_cond_latents=None,
             )
             # CFG formula: pred = pred_uncond + scale * (pred_cond - pred_uncond)
-            noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+            noise_pred = noise_pred_uncond + cfg_scale * (
+                noise_pred_cond - noise_pred_uncond
+            )
         else:
             noise_pred = noise_pred_cond
 
         # Scheduler step: update latents
-        if sample_solver == 'unipc':
+        if sample_solver == "unipc":
             # UniPC scheduler expects different API
             step_output = scheduler.step(
                 noise_pred,
@@ -355,7 +370,11 @@ def denoise(
                 latents,
                 return_dict=False,
             )
-            latents = step_output[0] if isinstance(step_output, tuple) else step_output.prev_sample
+            latents = (
+                step_output[0]
+                if isinstance(step_output, tuple)
+                else step_output.prev_sample
+            )
         else:
             # Simple FlowMatchScheduler
             latents = scheduler.step(noise_pred, timesteps[progress_id], latents)
@@ -410,7 +429,7 @@ def save_video(
 ):
     """
     Save a video tensor to an MP4 file.
-    
+
     Args:
         name: Output filename (should end with .mp4)
         output_dir: Directory to save the video
@@ -420,29 +439,29 @@ def save_video(
     """
     # logger.info(f"Saving video to {output_dir}/{name}")
     # logger.info(f"Video shape: {video.shape}, dtype: {video.dtype}, device: {video.device}")
-    
+
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     output_name = os.path.join(output_dir, name)
-    
+
     # Remove batch dimension if present: [1, C, T, H, W] -> [C, T, H, W]
     if video.dim() == 5:
         video = video[0]
-    
+
     # Clamp values to [-1, 1] range (required for proper conversion)
     video = video.clamp(-1, 1)
-    
+
     # Convert from [-1, 1] to [0, 255] uint8
     # Formula: (video + 1.0) * 127.5 maps [-1, 1] to [0, 255]
     video = (video + 1.0) * 127.5
     video = video.clamp(0, 255).byte()
-    
+
     # Rearrange from [C, T, H, W] to [T, H, W, C] for video writing
     video = rearrange(video, "c t h w -> t h w c")
-    
+
     # Move to CPU if on GPU and convert to numpy array
     video_np = video.cpu().numpy()
-    
+
     # Save video using torchvision
     # torchvision.io.write_video expects [T, H, W, C] format and uint8 values
     # fps: frames per second (default to 8 fps, adjust as needed)

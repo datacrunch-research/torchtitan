@@ -58,9 +58,7 @@ class Encoder:
     clip_encoder: str = "openai/clip-vit-large-patch14"
     """Clip encoder to use, HuggingFace model name. This field could be either a local folder path,
         or a Huggingface repo name."""
-    autoencoder_path: str = (
-        "torchtitan/models/flux/assets/autoencoder/ae.safetensors"
-    )
+    autoencoder_path: str = "torchtitan/models/flux/assets/autoencoder/ae.safetensors"
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     wan_vae_path: str = "Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
     """Wan Video VAE checkpoint path to load. This should be a local path referring to a .pth or .safetensors file."""
@@ -91,6 +89,7 @@ class Validation:
     """Whether to generate all stratified timesteps per sample or use round robin"""
     num_cond_frames: int = 5
     """Number of frames to condition on"""
+
 
 @dataclass
 class Inference:

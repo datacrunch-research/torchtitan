@@ -137,7 +137,7 @@ def build_wan_tokenizer(job_config: JobConfig) -> BaseTokenizer:
     Build the tokenizer for Wan model (T5).
     """
     from torchtitan.tools.logging import logger
-    
+
     t5_tokenizer_path = job_config.encoder.t5_encoder
     max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
 
@@ -150,7 +150,9 @@ def build_wan_tokenizer(job_config: JobConfig) -> BaseTokenizer:
         tokenizer_class = WanTokenizer
 
     # T5 tokenizer will pad the token sequence to max_t5_encoding_len
-    logger.info(f"Loading T5 tokenizer from: {t5_tokenizer_path} (max_length={max_t5_encoding_len})")
+    logger.info(
+        f"Loading T5 tokenizer from: {t5_tokenizer_path} (max_length={max_t5_encoding_len})"
+    )
     t5_tokenizer = tokenizer_class(
         t5_tokenizer_path,
         max_length=max_t5_encoding_len,

@@ -4,20 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
-from torch import nn, Tensor
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import Replicate, Shard
-import math
 import hashlib
 import json
 from pathlib import Path
+from typing import Optional
+
+import torch
 from einops import rearrange
-from typing import Tuple, Optional
 from safetensors.torch import load_file as load_safetensors
-from torchtitan.tools.logging import logger
+from torch import nn, Tensor
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Shard
 
 from torchtitan.experiments.wan.model.layers import (
+    DiTBlock,
+    Head,
     # DoubleStreamBlock,
     # EmbedND,
     # LastLayer,
@@ -25,9 +26,9 @@ from torchtitan.experiments.wan.model.layers import (
     # SingleStreamBlock,
     # timestep_embedding,
     precompute_freqs_cis_3d,
-    Head,
-    DiTBlock,
 )
+from torchtitan.tools.logging import logger
+
 # from torchtitan.protocols import ModelProtocol
 
 from .args import WanModelArgs
@@ -624,7 +625,7 @@ if __name__ == "__main__":
     """
     Test script for weight loading functionality.
     This can be run directly to verify that pretrained weights load correctly.
-    
+
     Usage:
         python -m torchtitan.experiments.wan.model.model
     """
@@ -655,7 +656,7 @@ if __name__ == "__main__":
         text_dim=4096,
     )
 
-    print(f"\nModel configuration:")
+    print("\nModel configuration:")
     print(f"  - num_layers: {model_args.num_layers}")
     print(f"  - hidden_dim: {model_args.hidden_dim}")
     print(f"  - num_heads: {model_args.num_heads}")
@@ -671,7 +672,7 @@ if __name__ == "__main__":
     trainable_params_before = sum(
         p.numel() for p in model.parameters() if p.requires_grad
     )
-    print(f"\nModel parameters (before loading weights):")
+    print("\nModel parameters (before loading weights):")
     print(f"  - Total parameters: {total_params_before:,}")
     print(f"  - Trainable parameters: {trainable_params_before:,}")
 
@@ -692,7 +693,7 @@ if __name__ == "__main__":
         model_state_dict = model.state_dict()
         loaded_params = sum(p.numel() for p in model.parameters())
 
-        print(f"\nModel parameters (after loading weights):")
+        print("\nModel parameters (after loading weights):")
         print(f"  - Total parameters: {loaded_params:,}")
         print(f"  - Number of parameter tensors: {len(model_state_dict)}")
 
@@ -750,7 +751,7 @@ if __name__ == "__main__":
         context_seq_len = 512
         context = torch.randn(batch_size, context_seq_len, model_args.text_dim)
 
-        print(f"\nInput shapes:")
+        print("\nInput shapes:")
         print(f"  - x (video latents): {x.shape}")
         print(f"  - timesteps: {timesteps.shape}")
         print(f"  - context: {context.shape}")
@@ -760,7 +761,7 @@ if __name__ == "__main__":
         with torch.no_grad():
             output = model(x, timesteps, context)
 
-        print(f"\n✓ Forward pass successful!")
+        print("\n✓ Forward pass successful!")
         print(f"  - Output shape: {output.shape}")
         print(f"  - Output mean: {output.mean().item():.6f}")
         print(f"  - Output std: {output.std().item():.6f}")

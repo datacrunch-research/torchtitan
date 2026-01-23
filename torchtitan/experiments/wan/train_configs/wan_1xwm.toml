@@ -31,12 +31,12 @@ warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
 [training]
-local_batch_size = 128
+local_batch_size = 32
 max_norm = 1.0  # grad norm clipping
 steps = 30_000
 dataset = "1xwm"
 dataset_path = "./dataset/world_model_raw_data/train_v2.0_raw"
-downsampled = 4  # Downsampling factor: 1, 2, or 4
+downsampled = 1  # Downsampling factor: 1, 2, or 4
 clip_length = 77  # Number of frames per clip
 window_size = 8  # Window size for sampling clips
 robot_temporal_mode = "downsample"  # How to handle robot state temporal alignment
@@ -62,7 +62,7 @@ mode = "full"
 [compile]
 enable = false  # Enable torch.compile for VAE and model
 components = ["vae", "model"]  # Compile both VAE and diffusion model
-backend = "inductor" 
+backend = "inductor"
 
 [checkpoint]
 enable = true
@@ -85,4 +85,3 @@ denoising_steps = 50
 save_img_count = 50
 save_img_folder = "videos"
 all_timesteps = false
-

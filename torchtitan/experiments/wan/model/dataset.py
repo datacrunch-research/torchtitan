@@ -1,16 +1,24 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import contextlib
 import json
 import logging
 import os
 import sys
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from pathlib import Path
 
 # Silence decord warnings about video seeking issues
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "1")
 import decord
+
 decord.bridge.set_bridge("torch")
 logging.getLogger("decord").setLevel(logging.ERROR)
 
@@ -139,9 +147,7 @@ class RawVideoDataset(Dataset):
         # Suppress stderr to silence decord C++ warnings about video seeking
         with suppress_stderr():
             vr = decord.VideoReader(str(self.videos_path / f"video_{shard_idx}.mp4"))
-            video_frames = vr.get_batch(
-                range(start_idx, start_idx + self.clip_length)
-            )
+            video_frames = vr.get_batch(range(start_idx, start_idx + self.clip_length))
         # With decord.bridge.set_bridge("torch"), get_batch returns a torch tensor directly
         # video_frames = video_frames.permute(0, 3, 1, 2)
         if self.downsampled:

@@ -5,29 +5,23 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Iterable, Optional
 import time
-
+from typing import Iterable, Optional
 
 import torch
 
-from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import utils as dist_utils
-from torchtitan.tools import utils
 from torchtitan.components.dataloader import DataloaderExhaustedError
 
+from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.distributed import utils as dist_utils
 
 from torchtitan.experiments.wan.infra.parallelize import parallelize_encoders
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
-from torchtitan.experiments.wan.utils import (
-    create_position_encoding_for_latents,
-    pack_latents,
-    unpack_latents,
-    preprocess_data,
-)
-from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
 
 from torchtitan.experiments.wan.model.wan_vae import load_wan_vae
+from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
+from torchtitan.experiments.wan.utils import pack_latents, preprocess_data
+from torchtitan.tools import utils
 
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
@@ -188,7 +182,7 @@ class WanTrainer(Trainer):
         self.t5_encoder = None
         # Also delete tokenizer as it's no longer needed
         del t5_tokenizer
-        
+
         if job_config.validation.enable:
             logger.info("Initializing Wan validator...")
             logger.info(f"t5_encoder is None {self.t5_encoder is None}")
@@ -349,7 +343,7 @@ class WanTrainer(Trainer):
             if self.parallel_dims.cp_enabled
             else None
         )
-        
+
         # TODO: MFU Computation
         # Forward pass through the model
         torch.cuda.synchronize()
@@ -402,12 +396,12 @@ if __name__ == "__main__":
 
         if config.checkpoint.create_seed_checkpoint:
             logger.info("Creating seed checkpoint...")
-            assert int(os.environ["WORLD_SIZE"]) == 1, (
-                "Must create seed checkpoint using a single device, to disable sharding."
-            )
-            assert config.checkpoint.enable, (
-                "Must enable checkpointing when creating a seed checkpoint."
-            )
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                config.checkpoint.enable
+            ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Seed checkpoint created successfully")
         else:

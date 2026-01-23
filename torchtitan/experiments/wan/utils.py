@@ -10,9 +10,10 @@ import torch
 
 from torch import Tensor
 
+from torchtitan.tools.logging import logger
+
 from .model.hf_embedder import WanEmbedder
 from .model.wan_vae import WanVideoVAE
-from torchtitan.tools.logging import logger
 
 
 def encode_t5_wan22_style(
@@ -179,18 +180,18 @@ def preprocess_data(
 
 
 def generate_noise_latent(
-    bsz: int, 
+    bsz: int,
     num_frames: int,
-    height: int, 
-    width: int, 
-    device: str | torch.device, 
+    height: int,
+    width: int,
+    device: str | torch.device,
     dtype: torch.dtype,
-    z_dim: int = 48, 
+    z_dim: int = 48,
     latent_ratio: int = 16,
     seed: Optional[int] = None,
 ) -> Tensor:
     """Initialize the noise latent tensor for the Wan model.
-    
+
     Args:
         bsz (int): batch_size.
         num_frames (int): number of frames in the video.
@@ -199,9 +200,9 @@ def generate_noise_latent(
         device (str | torch.device): The device to create the tensor on.
         dtype (torch.dtype): The dtype for the noise tensor.
         z_dim (int, optional): Latent channel dimension. Defaults to 48.
-        latent_ratio (int, optional): Downsampling ratio for spatial dimensions. 
+        latent_ratio (int, optional): Downsampling ratio for spatial dimensions.
             Defaults to 16 (e.g., 512 x 512 -> 32 x 32 latent).
-        seed (int, optional): Random seed for reproducibility. If None, uses 
+        seed (int, optional): Random seed for reproducibility. If None, uses
             default random state.
 
     Returns:
@@ -225,10 +226,11 @@ def generate_noise_latent(
         noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
     else:
         noise = torch.randn(shape, device=device, dtype=dtype)
-    
+
     return noise
 
-# 
+
+#
 
 
 def create_position_encoding_for_latents(

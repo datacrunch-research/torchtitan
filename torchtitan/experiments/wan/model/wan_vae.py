@@ -1,18 +1,21 @@
-from torchtitan.tools.logging import logger, init_logger
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
 from einops import rearrange, repeat
 from safetensors.torch import load_file as load_sft
-from typing import Optional
 from torchmetrics.functional.image import peak_signal_noise_ratio
-from torchtitan.tools.logging import logger
 from torchtitan.experiments.wan.model.dataset import RawVideoDataset
-
-
-import os
-from icecream import ic
+from torchtitan.tools.logging import init_logger, logger
 
 # Configure icecream debug prints (works independently of logging level)
 # By default, icecream is enabled and outputs to stderr (works with 2>&1 redirection)
@@ -1371,7 +1374,9 @@ class WanVideoVAE(nn.Module):
                 :,
                 target_h : target_h + hidden_states_batch.shape[3],
                 target_w : target_w + hidden_states_batch.shape[4],
-            ] += hidden_states_batch * mask
+            ] += (
+                hidden_states_batch * mask
+            )
             weight[
                 :,
                 :,
@@ -1446,7 +1451,9 @@ class WanVideoVAE(nn.Module):
                 :,
                 target_h : target_h + hidden_states_batch.shape[3],
                 target_w : target_w + hidden_states_batch.shape[4],
-            ] += hidden_states_batch * mask
+            ] += (
+                hidden_states_batch * mask
+            )
             weight[
                 :,
                 :,
@@ -2063,7 +2070,6 @@ def load_wan_vae(
 
 def main():
     from torch.utils.data import DataLoader
-    from icecream import ic
 
     init_logger()
     logger.info("Starting main function")

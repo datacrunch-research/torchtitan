@@ -409,6 +409,9 @@ class MetricsProcessor:
         extra_metrics: dict[str, Any] | None = None,
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
+        vae_pct = None
+        model_pct = None
+        model_mfu = model_tps = model_tflops = None
 
         time_delta = time.perf_counter() - self.time_last_log
 
@@ -428,8 +431,8 @@ class MetricsProcessor:
 
         # TODO: improve this (Wan implementation)
         # Compute VAE/model time breakdown if available (for video models like WAN)
-        vae_time_total = sum(getattr(self, 'vae_times', [])) or 0
-        model_time_total = sum(getattr(self, 'model_times', [])) or 0
+        vae_time_total = sum(getattr(self, "vae_times", [])) or 0
+        model_time_total = sum(getattr(self, "model_times", [])) or 0
         has_time_breakdown = vae_time_total > 0 and model_time_total > 0
         if has_time_breakdown:
             # Model-only MFU excludes VAE time
@@ -464,23 +467,24 @@ class MetricsProcessor:
         if extra_metrics:
             metrics.update(extra_metrics)
 
-
         # TODO: improve this (Wan implementation)
         # Add VAE/model breakdown metrics if available
         if has_time_breakdown:
-            metrics.update({
-                "time_metrics/vae(%)": vae_pct,
-                "time_metrics/model(%)": model_pct,
-                "model_only/tps": model_tps,
-                "model_only/tflops": model_tflops,
-                "model_only/mfu(%)": model_mfu,
-            })
+            metrics.update(
+                {
+                    "time_metrics/vae(%)": vae_pct,
+                    "time_metrics/model(%)": model_pct,
+                    "model_only/tps": model_tps,
+                    "model_only/tflops": model_tflops,
+                    "model_only/mfu(%)": model_mfu,
+                }
+            )
 
         self.logger.log(metrics, step)
 
         color = self.color
         if has_time_breakdown:
-           # TODO: improve this (Wan implementation)
+            # TODO: improve this (Wan implementation)
             logger.info(
                 f"{color.red}step: {step:2}  "
                 f"{color.green}loss: {global_avg_loss:7.4f}  "
@@ -508,9 +512,9 @@ class MetricsProcessor:
         self.data_loading_times.clear()
         # TODO: improve this (Wan implementation)
         # Clear VAE/model times if they exist
-        if hasattr(self, 'vae_times'):
+        if hasattr(self, "vae_times"):
             self.vae_times.clear()
-        if hasattr(self, 'model_times'):
+        if hasattr(self, "model_times"):
             self.model_times.clear()
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()

@@ -6,8 +6,9 @@
 #
 # Adapted from 1x-challenge implementation
 
-import torch
 import math
+
+import torch
 
 
 class FlowMatchScheduler:

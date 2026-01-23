@@ -13,10 +13,11 @@ from transformers import T5EncoderModel
 class WanEmbedder(nn.Module):
     """
     Wrapper for T5 encoder model for Wan model text encoding.
-    
+
     This class provides a unified interface for loading and using T5 encoder models
     with FSDP compatibility.
     """
+
     def __init__(self, version: str, random_init=False, **hf_kwargs):
         super().__init__()
 
@@ -38,7 +39,11 @@ class WanEmbedder(nn.Module):
 
         # Store pad_token_id for Wan2.2-style encoding (trim and zero-pad)
         # T5 uses pad_token_id=0 by default
-        self.pad_token_id = self.hf_module.config.pad_token_id if hasattr(self.hf_module.config, 'pad_token_id') else 0
+        self.pad_token_id = (
+            self.hf_module.config.pad_token_id
+            if hasattr(self.hf_module.config, "pad_token_id")
+            else 0
+        )
 
     def make_parameters_contiguous(self):
         """Make all non-contiguous parameters contiguous to avoid FSDP issues."""
@@ -49,10 +54,10 @@ class WanEmbedder(nn.Module):
     def forward(self, batch_tokens: Tensor) -> Tensor:
         """
         Forward pass through the T5 encoder.
-        
+
         Args:
             batch_tokens: Token IDs tensor of shape [bsz, seq_len]
-            
+
         Returns:
             Hidden states tensor of shape [bsz, seq_len, hidden_dim]
         """

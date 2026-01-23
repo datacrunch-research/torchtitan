@@ -18,7 +18,6 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecision
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
 # # Import LoRA functions (only when needed)
