@@ -36,6 +36,10 @@ class WanEmbedder(nn.Module):
         # This is to make sure the encoder works with FSDP
         self.make_parameters_contiguous()
 
+        # Store pad_token_id for Wan2.2-style encoding (trim and zero-pad)
+        # T5 uses pad_token_id=0 by default
+        self.pad_token_id = self.hf_module.config.pad_token_id if hasattr(self.hf_module.config, 'pad_token_id') else 0
+
     def make_parameters_contiguous(self):
         """Make all non-contiguous parameters contiguous to avoid FSDP issues."""
         for name, param in self.hf_module.named_parameters():

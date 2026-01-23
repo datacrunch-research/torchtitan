@@ -175,6 +175,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
             block,
             backend=compile_config.backend,
             fullgraph=True,  # Require full graph for better optimization
+            dynamic=True,  # Handle varying input sizes without recompilation
         )
         model.blocks.register_module(layer_id, compiled_block)
         compiled_blocks += 1

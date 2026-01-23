@@ -17,6 +17,20 @@ from typing import Tuple, Optional
 from safetensors.torch import load_file as load_safetensors
 from torchtitan.tools.logging import logger
 
+from torchtitan.experiments.wan.model.layers import (
+    # DoubleStreamBlock,
+    # EmbedND,
+    # LastLayer,
+    # MLPEmbedder,
+    # SingleStreamBlock,
+    # timestep_embedding,
+    precompute_freqs_cis_3d,
+    Head,
+    DiTBlock,
+)
+# from torchtitan.protocols import ModelProtocol
+
+from .args import WanModelArgs
 
 
 def hash_state_dict_keys(state_dict):
@@ -27,35 +41,41 @@ def hash_state_dict_keys(state_dict):
 
 
 def _load_dtensor_state_dict(model_state_dict, filtered_state_dict):
-    """Load checkpoint values into DTensor model parameters, handling FSDP sharding."""    
+    """Load checkpoint values into DTensor model parameters, handling FSDP sharding."""
     for key, checkpoint_value in filtered_state_dict.items():
         if key not in model_state_dict:
             continue
-            
+
         model_param = model_state_dict[key]
-        
+
         # Regular tensors: direct assignment
         if not isinstance(model_param, DTensor):
-            model_param.copy_(checkpoint_value.to(device=model_param.device, dtype=model_param.dtype))
+            model_param.copy_(
+                checkpoint_value.to(device=model_param.device, dtype=model_param.dtype)
+            )
             continue
-        
+
         # DTensors: extract shard and assign to local shard
         model_local = model_param.to_local()
-        checkpoint_value = checkpoint_value.to(device=model_local.device, dtype=model_local.dtype)
-        
+        checkpoint_value = checkpoint_value.to(
+            device=model_local.device, dtype=model_local.dtype
+        )
+
         # Extract shard if parameter is sharded (FSDP)
-        if len(model_param.placements) > 0 and isinstance(model_param.placements[0], Shard):
+        if len(model_param.placements) > 0 and isinstance(
+            model_param.placements[0], Shard
+        ):
             shard_dim = model_param.placements[0].dim
             rank = model_param.device_mesh.get_local_rank()
             world_size = model_param.device_mesh.size()
-            
+
             # Calculate shard indices
             full_size = checkpoint_value.shape[shard_dim]
             shard_size = full_size // world_size
             remainder = full_size % world_size
             start_idx = rank * shard_size + min(rank, remainder)
             end_idx = start_idx + shard_size + (1 if rank < remainder else 0)
-            
+
             # Extract shard
             if shard_dim == 0:
                 checkpoint_shard = checkpoint_value[start_idx:end_idx]
@@ -65,30 +85,15 @@ def _load_dtensor_state_dict(model_state_dict, filtered_state_dict):
                 checkpoint_shard = checkpoint_value[tuple(indices)]
         else:
             checkpoint_shard = checkpoint_value  # Replicate: use full tensor
-        
+
         # Assign if shapes match
         if checkpoint_shard.shape == model_local.shape:
             model_local.copy_(checkpoint_shard)
         else:
-            logger.warning(f"Shape mismatch for {key}: checkpoint {checkpoint_shard.shape} != model {model_local.shape}")
+            logger.warning(
+                f"Shape mismatch for {key}: checkpoint {checkpoint_shard.shape} != model {model_local.shape}"
+            )
 
-
-from torchtitan.experiments.wan.model.layers import (
-    DoubleStreamBlock,
-    EmbedND,
-    LastLayer,
-    MLPEmbedder,
-    SingleStreamBlock,
-    timestep_embedding,
-    precompute_freqs_cis_3d,
-    Head,
-    DiTBlock,
-
-)
-
-from torchtitan.protocols import ModelProtocol
-
-from .args import WanModelArgs
 
 class WanModel(torch.nn.Module):
     def __init__(self, model_args: WanModelArgs):
@@ -108,35 +113,29 @@ class WanModel(torch.nn.Module):
         self.hidden_size = model_args.hidden_size
         self.mlp_ratio = model_args.mlp_ratio
         self.num_heads = model_args.num_heads
-        
+
         self.patch_embedding = nn.Conv3d(
-            self.in_dim, 
-            self.hidden_dim, 
-            kernel_size=self.patch_size, 
-            stride=self.patch_size
+            self.in_dim,
+            self.hidden_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
         )
         self.text_embedding = nn.Sequential(
-            nn.Linear(self.text_dim, self.hidden_dim), 
-            nn.GELU(approximate="tanh"), 
-            nn.Linear(self.hidden_dim, self.hidden_dim)
+            nn.Linear(self.text_dim, self.hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
         )
         self.time_embedding = nn.Sequential(
-            nn.Linear(self.freq_dim, self.hidden_dim), 
-            nn.SiLU(), 
-            nn.Linear(self.hidden_dim, self.hidden_dim)
+            nn.Linear(self.freq_dim, self.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
         )
         self.time_projection = nn.Sequential(
-            nn.SiLU(), 
-            nn.Linear(self.hidden_dim, self.hidden_dim * 6)
+            nn.SiLU(), nn.Linear(self.hidden_dim, self.hidden_dim * 6)
         )
         self.blocks = nn.ModuleList(
             [
-                DiTBlock(
-                    self.hidden_dim, 
-                    self.num_heads, 
-                    self.ffn_dim, 
-                    self.eps
-                )
+                DiTBlock(self.hidden_dim, self.num_heads, self.ffn_dim, self.eps)
                 for _ in range(self.num_layers)
             ]
         )
@@ -147,17 +146,18 @@ class WanModel(torch.nn.Module):
         self.num_cond_frames = 5
         self.clip_length = 21
         self.num_latent_cond = 1 + self.num_cond_frames // 4
-    
-    
-    def init_weights(self, buffer_device=None, pretrained_weights_path: Optional[str] = None):
+
+    def init_weights(
+        self, buffer_device=None, pretrained_weights_path: Optional[str] = None
+    ):
         """
         Initialize model weights. If pretrained_weights_path is provided, loads weights from
         HuggingFace safetensors format. Otherwise, uses default initialization.
-        
+
         This method now supports loading weights into FSDP-wrapped models (DTensors) using
         PyTorch's distributed checkpoint APIs. Weights can be loaded either before or after
         FSDP wrapping.
-        
+
         Args:
             buffer_device: Device for buffer initialization (unused for weight loading)
             pretrained_weights_path: Path to directory containing pretrained weights.
@@ -166,25 +166,29 @@ class WanModel(torch.nn.Module):
         """
         # If explicitly set to empty string, skip weight loading
         if pretrained_weights_path == "":
-            logger.info("Pretrained weights path is empty string, skipping weight loading. Using default initialization.")
+            logger.info(
+                "Pretrained weights path is empty string, skipping weight loading. Using default initialization."
+            )
             return
-        
+
         # Default path to pretrained weights (relative to workspace root)
         # TODO: update that if None do not use the pretrained weights
         if pretrained_weights_path is None:
             rel_path = "assets/hf/Wan2.2-TI2V-5B"
             pretrained_weights_path = rel_path
-        
+
         # Check if pretrained weights directory exists
         weights_dir = Path(pretrained_weights_path)
-        logger.info(f"Attempting to load pretrained weights from: {pretrained_weights_path}")
+        logger.info(
+            f"Attempting to load pretrained weights from: {pretrained_weights_path}"
+        )
         if not weights_dir.exists():
             logger.warning(
                 f"Pretrained weights directory not found at {pretrained_weights_path}. "
                 "Skipping weight loading. Model will use default initialization."
             )
             return
-        
+
         # Load sharded safetensors files using the index
         index_file = weights_dir / "diffusion_pytorch_model.safetensors.index.json"
         if not index_file.exists():
@@ -193,22 +197,24 @@ class WanModel(torch.nn.Module):
                 "Skipping weight loading. Model will use default initialization."
             )
             return
-        
+
         logger.info(f"Found safetensors index file: {index_file}")
         try:
             # Read the index file to get weight mapping
             with open(index_file, "r") as f:
                 index_data = json.load(f)
-            
+
             weight_map = index_data.get("weight_map", {})
             if not weight_map:
-                logger.warning("Weight map is empty in index file. Skipping weight loading.")
+                logger.warning(
+                    "Weight map is empty in index file. Skipping weight loading."
+                )
                 return
-            
+
             # Collect all unique shard files
             shard_files = set(weight_map.values())
             logger.info(f"Found {len(shard_files)} shard file(s) to load from index")
-            
+
             # Load all shard files and combine into single state dict
             state_dict = {}
             for shard_file in shard_files:
@@ -216,33 +222,41 @@ class WanModel(torch.nn.Module):
                 if not shard_path.exists():
                     logger.warning(f"Shard file not found: {shard_path}. Skipping.")
                     continue
-                
+
                 # Load safetensors file
                 logger.info(f"Loading shard file: {shard_file}")
                 shard_state_dict = load_safetensors(str(shard_path))
                 state_dict.update(shard_state_dict)
                 logger.info(f"Loaded {len(shard_state_dict)} weights from {shard_file}")
-            
+
             if not state_dict:
-                logger.warning("No weights loaded from safetensors files. Skipping weight loading.")
+                logger.warning(
+                    "No weights loaded from safetensors files. Skipping weight loading."
+                )
                 return
-            
-            logger.info(f"Successfully loaded {len(state_dict)} total weights from all shard files")
-            
+
+            logger.info(
+                f"Successfully loaded {len(state_dict)} total weights from all shard files"
+            )
+
             # Filter state dict to only include keys that exist in the model
             # We now support loading into FSDP-wrapped models (DTensors) using set_model_state_dict
             logger.info("Filtering checkpoint weights to match model parameters...")
-            from torch.distributed.checkpoint.state_dict import get_model_state_dict, set_model_state_dict, StateDictOptions
-            
+            from torch.distributed.checkpoint.state_dict import (
+                get_model_state_dict,
+                set_model_state_dict,
+                StateDictOptions,
+            )
+
             # Get model state dict - this works with both regular models and FSDP-wrapped models
             model_state_dict = get_model_state_dict(self)
             logger.info(f"Model has {len(model_state_dict)} parameter tensors")
-            
+
             # Filter checkpoint weights to match model parameters
             filtered_state_dict = {}
             missing_keys = []
             unexpected_keys = []
-            
+
             for key, value in state_dict.items():
                 if key in model_state_dict:
                     # Check if shapes match
@@ -251,6 +265,7 @@ class WanModel(torch.nn.Module):
                     # set_model_state_dict() will handle sharding automatically
                     try:
                         from torch.distributed.tensor import DTensor
+
                         if isinstance(model_param, DTensor):
                             # DTensor case: use full_shape() to get the full tensor shape
                             model_shape = model_param.full_shape()
@@ -259,14 +274,16 @@ class WanModel(torch.nn.Module):
                             model_shape = model_param.shape
                     except (ImportError, AttributeError):
                         # Fallback: try to get shape directly
-                        if hasattr(model_param, 'shape'):
+                        if hasattr(model_param, "shape"):
                             model_shape = model_param.shape
                         else:
                             # If we can't determine shape, skip this key
-                            logger.warning(f"Cannot determine shape for key '{key}', skipping.")
+                            logger.warning(
+                                f"Cannot determine shape for key '{key}', skipping."
+                            )
                             missing_keys.append(key)
                             continue
-                    
+
                     if model_shape == value.shape:
                         filtered_state_dict[key] = value
                     else:
@@ -278,53 +295,64 @@ class WanModel(torch.nn.Module):
                         missing_keys.append(key)
                 else:
                     unexpected_keys.append(key)
-            
+
             # Log missing and unexpected keys
             logger.info(
                 f"Filtered checkpoint: {len(filtered_state_dict)} matching weights, "
                 f"{len(missing_keys)} shape mismatches, {len(unexpected_keys)} unexpected keys"
             )
             if missing_keys:
-                logger.info(f"Missing keys (not in model or shape mismatch): {len(missing_keys)}")
+                logger.info(
+                    f"Missing keys (not in model or shape mismatch): {len(missing_keys)}"
+                )
             if unexpected_keys:
                 logger.info(f"Unexpected keys (not in model): {len(unexpected_keys)}")
-            
+
             # Load the filtered state dict into the model
             # For FSDP-wrapped models (DTensors), we need to manually assign values
             # because set_model_state_dict() doesn't handle regular tensor -> DTensor conversion
             if filtered_state_dict:
                 logger.info(f"Loading {len(filtered_state_dict)} weights into model...")
-            
+
                 # Check if model has DTensors (FSDP-wrapped)
-                has_dtensors = any(isinstance(p, DTensor) for p in model_state_dict.values())
-                
+                has_dtensors = any(
+                    isinstance(p, DTensor) for p in model_state_dict.values()
+                )
+
                 if has_dtensors:
-                    logger.info("Model contains DTensors (FSDP-wrapped), assigning to local shards...")
+                    logger.info(
+                        "Model contains DTensors (FSDP-wrapped), assigning to local shards..."
+                    )
                     _load_dtensor_state_dict(model_state_dict, filtered_state_dict)
                 else:
                     # No DTensors - use standard set_model_state_dict
                     set_model_state_dict(
                         self,
                         model_state_dict=filtered_state_dict,
-                        options=StateDictOptions(strict=False)
+                        options=StateDictOptions(strict=False),
                     )
-                    logger.info(f"Loaded {len(filtered_state_dict)} weights using set_model_state_dict")
-                
+                    logger.info(
+                        f"Loaded {len(filtered_state_dict)} weights using set_model_state_dict"
+                    )
+
                 logger.info(
                     f"✓ Successfully loaded {len(filtered_state_dict)} pretrained weights from {pretrained_weights_path}. "
                     f"Missing keys: {len(missing_keys)}, Unexpected keys: {len(unexpected_keys)}"
                 )
             else:
-                logger.warning("No matching weights found. Model will use default initialization.")
-                
+                logger.warning(
+                    "No matching weights found. Model will use default initialization."
+                )
+
         except Exception as e:
             logger.error(
                 f"Error loading pretrained weights from {pretrained_weights_path}: {e}. "
                 "Model will use default initialization."
             )
             import traceback
+
             logger.info(traceback.format_exc())
-    
+
     @staticmethod
     def sinusoidal_embedding_1d_batched(dim, position):
         """
@@ -337,7 +365,8 @@ class WanModel(torch.nn.Module):
         B, T = position.shape
 
         # Reshape to (B*T,) to process all elements at once
-        position_flat = position.view(-1)
+        # Use reshape instead of view to handle non-contiguous tensors
+        position_flat = position.reshape(-1)
 
         # Apply the original function
         sinusoid = torch.outer(
@@ -354,7 +383,7 @@ class WanModel(torch.nn.Module):
 
         # Reshape back to (B, T, dim)
         return x.view(B, T, dim)
-    
+
     def patchify(
         self,
         x: torch.Tensor,
@@ -375,26 +404,60 @@ class WanModel(torch.nn.Module):
             y=self.patch_size[1],
             z=self.patch_size[2],
         )
-    
+
     def forward(
         self,
         x: Tensor,
         timesteps: Tensor,
         context: Tensor,
         robot_states: Optional[Tensor] = None,
+        num_cond_latents: Optional[int] = None,
     ) -> Tensor:
-        zeroes = torch.zeros(
-            (x.shape[0], self.num_latent_cond * x.shape[3] * x.shape[4] // 4),
-            dtype=x.dtype,
-            device=x.device,
-        )
-        broadcast_timesteps = timesteps[:, None].repeat(
-            1,
-            (x.shape[2] - self.num_latent_cond) * x.shape[3] * x.shape[4] // 4,
-        )
-        timesteps_combined = torch.cat([zeroes, broadcast_timesteps], dim=1).to(
-            dtype=x.dtype
-        )
+        # ========================================================================
+        # OLD APPROACH (simple slice assignment, no mask):
+        # ========================================================================
+        # zeroes = torch.zeros(
+        #     (x.shape[0], self.num_latent_cond * x.shape[3] * x.shape[4] // 4),
+        #     dtype=x.dtype,
+        #     device=x.device,
+        # )
+        # broadcast_timesteps = timesteps[:, None].repeat(
+        #     1,
+        #     (x.shape[2] - self.num_latent_cond) * x.shape[3] * x.shape[4] // 4,
+        # )
+        # timesteps_combined = torch.cat([zeroes, broadcast_timesteps], dim=1).to(
+        #     dtype=x.dtype
+        # )
+
+        # Handle timesteps: can be either [B] (scalar per batch) or [B, seq_len] (per-token)
+        if timesteps.dim() == 1:
+            # Scalar timesteps per batch - compute per-token timesteps internally
+            # Use provided num_cond_latents or fall back to default
+            num_cond = (
+                num_cond_latents
+                if num_cond_latents is not None
+                else self.num_latent_cond
+            )
+
+            # Create per-token timesteps following original Wan TI2V approach:
+            # - Conditioning tokens (first num_cond latent frames) get timestep=0 (already clean)
+            # - Generation tokens get the provided timestep (need denoising)
+            zeroes = torch.zeros(
+                (x.shape[0], num_cond * x.shape[3] * x.shape[4] // 4),
+                dtype=x.dtype,
+                device=x.device,
+            )
+            broadcast_timesteps = timesteps[:, None].repeat(
+                1,
+                (x.shape[2] - num_cond) * x.shape[3] * x.shape[4] // 4,
+            )
+            timesteps_combined = torch.cat([zeroes, broadcast_timesteps], dim=1).to(
+                dtype=x.dtype
+            )
+        else:
+            # Per-token timesteps already provided [B, seq_len] - use directly
+            timesteps_combined = timesteps.to(dtype=x.dtype)
+
         ts = self.time_embedding(
             self.sinusoidal_embedding_1d_batched(self.freq_dim, timesteps_combined)
         )
@@ -417,17 +480,15 @@ class WanModel(torch.nn.Module):
             )
         else:
             freqs_tuple = self.freqs
-        
-        freqs = (
-            torch.cat(
-                [
-                    freqs_tuple[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                    freqs_tuple[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                    freqs_tuple[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-                ],
-                dim=-1,
-            ).reshape(f * h * w, 1, -1)
-        )
+
+        freqs = torch.cat(
+            [
+                freqs_tuple[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                freqs_tuple[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                freqs_tuple[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
+            ],
+            dim=-1,
+        ).reshape(f * h * w, 1, -1)
         # Ensure freqs is on the same device as x (important for FSDP/meta device)
         # Note: freqs are now real tensors (cos/sin pairs) instead of complex for better torch.compile support
         if freqs.device != x.device:
@@ -435,14 +496,14 @@ class WanModel(torch.nn.Module):
 
         for block in self.blocks:
             x = block(x, context, t_mod, freqs, robot_states)
-        
+
         # Head expects ts (time embedding) not t_mod (projected modulation)
         # Reference: wan_video_1x.py line 560 and wan_video_1x_dit.py line 884
         # ts has shape (B, L, dim) which matches Head.forward() expectation for 3D input
         x = self.head(x, ts)
         x = self.unpatchify(x, (f, h, w))
         return x
-        
+
 
 class WanModelStateDictConverter:
     def __init__(self):
@@ -568,14 +629,14 @@ if __name__ == "__main__":
         python -m torchtitan.experiments.wan.model.model
     """
     import sys
-    
+
     # Import WanModelArgs (already imported at top, but ensure it's available)
     # WanModelArgs is already imported at the top of the file
-    
+
     print("=" * 80)
     print("Testing WanModel weight loading")
     print("=" * 80)
-    
+
     # Create model args with default values
     # These should match the pretrained model configuration
     model_args = WanModelArgs(
@@ -593,46 +654,48 @@ if __name__ == "__main__":
         num_heads=24,
         text_dim=4096,
     )
-    
+
     print(f"\nModel configuration:")
     print(f"  - num_layers: {model_args.num_layers}")
     print(f"  - hidden_dim: {model_args.hidden_dim}")
     print(f"  - num_heads: {model_args.num_heads}")
     print(f"  - ffn_dim: {model_args.ffn_dim}")
     print(f"  - patch_size: {model_args.patch_size}")
-    
+
     # Create model instance
     print("\nCreating model instance...")
     model = WanModel(model_args)
-    
+
     # Count parameters before loading
     total_params_before = sum(p.numel() for p in model.parameters())
-    trainable_params_before = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    trainable_params_before = sum(
+        p.numel() for p in model.parameters() if p.requires_grad
+    )
     print(f"\nModel parameters (before loading weights):")
     print(f"  - Total parameters: {total_params_before:,}")
     print(f"  - Trainable parameters: {trainable_params_before:,}")
-    
+
     # Test weight loading
     print("\n" + "=" * 80)
     print("Testing weight loading...")
     print("=" * 80)
-    
+
     # Try loading with default path
     weights_path = "/mnt/cephfs/dc/riccardo/torchtitan/assets/hf/Wan2.2-TI2V-5B"
     print(f"\nAttempting to load weights from: {weights_path}")
-    
+
     try:
         model.init_weights(pretrained_weights_path=weights_path)
         print("\n✓ Weight loading completed successfully!")
-        
+
         # Get state dict to check what was loaded
         model_state_dict = model.state_dict()
         loaded_params = sum(p.numel() for p in model.parameters())
-        
+
         print(f"\nModel parameters (after loading weights):")
         print(f"  - Total parameters: {loaded_params:,}")
         print(f"  - Number of parameter tensors: {len(model_state_dict)}")
-        
+
         # Check a few key weights to verify they're loaded
         print("\nVerifying key weight tensors:")
         key_weights = [
@@ -642,69 +705,73 @@ if __name__ == "__main__":
             "blocks.0.self_attn.q.weight",
             "head.head.weight",
         ]
-        
+
         for key in key_weights:
             if key in model_state_dict:
                 weight = model_state_dict[key]
-                print(f"  ✓ {key}: shape {tuple(weight.shape)}, "
-                      f"mean={weight.mean().item():.6f}, "
-                      f"std={weight.std().item():.6f}")
+                print(
+                    f"  ✓ {key}: shape {tuple(weight.shape)}, "
+                    f"mean={weight.mean().item():.6f}, "
+                    f"std={weight.std().item():.6f}"
+                )
             else:
                 print(f"  ✗ {key}: NOT FOUND")
-        
+
         print("\n" + "=" * 80)
         print("Weight loading test completed successfully!")
         print("=" * 80)
-        
+
     except Exception as e:
         print(f"\n✗ Error during weight loading: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
-    
+
     # Optional: Test forward pass with dummy data
     print("\n" + "=" * 80)
     print("Testing forward pass with dummy data...")
     print("=" * 80)
-    
+
     try:
         # Create dummy input data
         batch_size = 1
         num_frames = 21  # clip_length
         height, width = 64, 64  # Latent space dimensions
         in_channels = model_args.in_dim
-        
+
         # Input video latents: (B, C, F, H, W)
         x = torch.randn(batch_size, in_channels, num_frames, height, width)
-        
+
         # Timesteps: (B,)
         timesteps = torch.randint(0, 1000, (batch_size,))
-        
+
         # Text context: (B, seq_len, text_dim)
         context_seq_len = 512
         context = torch.randn(batch_size, context_seq_len, model_args.text_dim)
-        
+
         print(f"\nInput shapes:")
         print(f"  - x (video latents): {x.shape}")
         print(f"  - timesteps: {timesteps.shape}")
         print(f"  - context: {context.shape}")
-        
+
         # Run forward pass
         model.eval()
         with torch.no_grad():
             output = model(x, timesteps, context)
-        
+
         print(f"\n✓ Forward pass successful!")
         print(f"  - Output shape: {output.shape}")
         print(f"  - Output mean: {output.mean().item():.6f}")
         print(f"  - Output std: {output.std().item():.6f}")
-        
+
         print("\n" + "=" * 80)
         print("All tests passed! ✓")
         print("=" * 80)
-        
+
     except Exception as e:
         print(f"\n✗ Error during forward pass: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

@@ -41,15 +41,15 @@ clip_length = 77  # Number of frames per clip
 window_size = 8  # Window size for sampling clips
 robot_temporal_mode = "downsample"  # How to handle robot state temporal alignment
 classifier_free_guidance_prob = 0.447
-img_size = 256
+# img_size = 256
 num_workers = 8  # Number of worker processes for data loading (0 = main process only)
 persistent_workers = true  # Keep workers alive across epochs (requires num_workers > 0)
 pin_memory = true  # Pin memory for faster GPU transfer (recommended when using GPU)
 prefetch_factor = 1  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
 
 [encoder]
-t5_encoder = "google/t5-v1_1-xxl"
-max_t5_encoding_len = 256
+t5_encoder = "google/umt5-xxl"
+max_t5_encoding_len = 512# 256
 wan_vae_path = "assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
 
 [parallelism]
@@ -61,13 +61,13 @@ mode = "full"
 
 [compile]
 enable = false  # Enable torch.compile for VAE and model
-components = ["vae"]  # Compile model (VAE will also be compiled when enabled)
+components = ["vae", "model"]  # Compile both VAE and diffusion model
 backend = "inductor" 
 
 [checkpoint]
-enable = false
+enable = true
 folder = "checkpoint"
-interval = 1_000
+interval = 100
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]
@@ -76,13 +76,13 @@ async_mode = "async"  # ["disabled", "async", "async_with_pinned_mem"]
 enable = true
 dataset = "1xwm"  # Can use same dataset for validation
 dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"  # Validation dataset path
-local_batch_size = 1
-steps = 1    # Recommended value with the current settings and world_size=8
-freq = 1000
-enable_classifier_free_guidance = true
-classifier_free_guidance_scale = 5.0
+local_batch_size = 4
+steps = 8    # Recommended value with the current settings and world_size=8
+freq = 10
+enable_classifier_free_guidance = false
+classifier_free_guidance_scale = 1.0
 denoising_steps = 50
 save_img_count = 50
-save_img_folder = "img"
+save_img_folder = "videos"
 all_timesteps = false
 

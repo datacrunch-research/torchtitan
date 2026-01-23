@@ -1,10 +1,33 @@
+import contextlib
 import json
+import logging
+import os
+import sys
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
 
+# Silence decord warnings about video seeking issues
+os.environ.setdefault("DECORD_EOF_RETRY_MAX", "1")
 import decord
+decord.bridge.set_bridge("torch")
+logging.getLogger("decord").setLevel(logging.ERROR)
+
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Context manager to suppress stderr (for silencing C++ warnings from decord)."""
+    stderr_fd = sys.stderr.fileno()
+    old_stderr_fd = os.dup(stderr_fd)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, stderr_fd)
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr_fd, stderr_fd)
+        os.close(old_stderr_fd)
+        os.close(devnull)
 
 
 class RawVideoDataset(Dataset):
@@ -113,16 +136,18 @@ class RawVideoDataset(Dataset):
             shape=(num_frames, 25),
         )[start_idx : start_idx + self.clip_length]
 
-        vr = decord.VideoReader(str(self.videos_path / f"video_{shard_idx}.mp4"))
-        video_frames = vr.get_batch(
-            range(start_idx, start_idx + self.clip_length)
-        ).asnumpy()
+        # Suppress stderr to silence decord C++ warnings about video seeking
+        with suppress_stderr():
+            vr = decord.VideoReader(str(self.videos_path / f"video_{shard_idx}.mp4"))
+            video_frames = vr.get_batch(
+                range(start_idx, start_idx + self.clip_length)
+            )
+        # With decord.bridge.set_bridge("torch"), get_batch returns a torch tensor directly
         # video_frames = video_frames.permute(0, 3, 1, 2)
         if self.downsampled:
             video_frames = video_frames[self.frame_idxs]
             if self.robot_temporal_mode == "downsample":
                 robot_states = robot_states[self.frame_idxs]
-        video_frames = torch.from_numpy(video_frames)
 
         # Note: this could be put here to do all the frame preprocessing at once
         # video_frames = torch.tensor(video_frames, dtype=torch.bfloat16)

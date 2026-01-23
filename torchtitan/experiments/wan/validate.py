@@ -29,7 +29,7 @@ from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
 from torchtitan.experiments.wan.tokenizer import build_wan_tokenizer
 from torchtitan.experiments.wan.utils import (
-    create_position_encoding_for_latents,
+    # create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
 )
@@ -114,6 +114,13 @@ class WanValidator(Validator):
         model_parts: list[nn.Module],
         step: int,
     ) -> None:
+        """
+        Run validation during training.
+
+        This generates videos using the diffusion model and computes PSNR
+        against ground truth to measure model performance.
+        """
+
         # Set model to eval mode
         # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
@@ -123,12 +130,11 @@ class WanValidator(Validator):
         training_cfg_prob = self.job_config.training.classifier_free_guidance_prob
         self.job_config.training.classifier_free_guidance_prob = 0.0
 
-        save_img_count = self.job_config.validation.save_img_count
-
         parallel_dims = self.parallel_dims
+        num_cond_frames = self.job_config.validation.num_cond_frames
 
+        all_psnr_values = []
         accumulated_losses = []
-        device_type = dist_utils.device_type
         num_steps = 0
 
         for input_dict, labels in self.validation_dataloader:
@@ -138,52 +144,12 @@ class WanValidator(Validator):
             ):
                 break
 
-            prompt = input_dict.pop("prompt")
-            if not isinstance(prompt, list):
-                prompt = [prompt]
-            for p in prompt:
-                if save_img_count != -1 and save_img_count <= 0:
-                    break
-                
-                input_dict["num_cond_frames"] = self.job_config.validation.num_cond_frames
-                logger.info(input_dict.keys())
-                video = generate_video(
-                    device=self.device,
-                    dtype=self._dtype,
-                    job_config=self.job_config,
-                    model=model,
-                    input_dict=input_dict,
-                    wan_video_vae=self.wan_video_vae,
-                    t5_tokenizer=self.t5_tokenizer,
-                    t5_encoder=self.t5_encoder,
-                    precomputed_t5_embedding=self.precomputed_t5_embedding,
-                )
-                logger.info(f"Video shape: {video.shape}")
+            # Store original video frames for PSNR computation
+            original_video_frames = input_dict["video_frames"].clone()
 
-                save_video(
-                    name=f"video_rank{str(torch.distributed.get_rank())}_{step}.mp4",
-                    output_dir=os.path.join(
-                        self.job_config.job.dump_folder,
-                        self.job_config.validation.save_img_folder,
-                    ),
-                    video=video,
-                    add_sampling_metadata=True,
-                )
-                # save_image(
-                #     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
-                #     output_dir=os.path.join(
-                #         self.job_config.job.dump_folder,
-                #         self.job_config.validation.save_img_folder,
-                #     ),
-                #     x=image,
-                #     add_sampling_metadata=True,
-                #     prompt=p,
-                # )
-                # save_img_count -= 1
-
-            # generate t5 embeddings
-            input_dict["image"] = labels
-            input_dict = preprocess_data(
+            # Compute MSE loss similar to training
+            # Preprocess data: generate t5 embeddings, encode video with VAE
+            processed_input = preprocess_data(
                 device=self.device,
                 dtype=self._dtype,
                 wan_video_vae=self.wan_video_vae,
@@ -191,108 +157,183 @@ class WanValidator(Validator):
                 batch=input_dict,
                 precomputed_t5_embedding=self.precomputed_t5_embedding,
             )
-            labels = input_dict["latents"]
-            # labels = input_dict["img_encodings"].to(device_type)
-            t5_encodings = input_dict["t5_encodings"]
-            logger.info(f"T5 encodings shape: {t5_encodings.shape}")
-            logger.info(f"Labels shape: {labels.shape}")
 
-            bsz = labels.shape[0]
-            # TODO: Add here the sampling code for Wan model
-            # If using all_timesteps we generate all 8 timesteps and expand our batch inputs here
-            if self.all_timesteps:
-                stratified_timesteps = torch.tensor(
-                    [1 / 8 * (i + 0.5) for i in range(8)],
-                    dtype=torch.float32,
-                    device=self.device,
-                ).repeat(bsz)
-                t5_encodings = t5_encodings.repeat_interleave(8, dim=0)
-                labels = labels.repeat_interleave(8, dim=0)
-            else:
-                stratified_timesteps = input_dict.pop("timestep")
+            t5_encodings = processed_input["t5_encodings"]
+            latents = processed_input["latents"]  # Ground truth latents
 
-            # Note the tps may be inaccurate due to the generating image step not being counted
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            bsz = latents.shape[0]
 
-            # Apply timesteps here and update our bsz to efficiently compute all timesteps and samples in a single forward pass
-            with torch.no_grad(), torch.device(self.device):
-                noise = torch.randn_like(labels)
-                timesteps = stratified_timesteps.to(labels)
-                sigmas = timesteps.view(-1, 1, 1, 1)
-                latents = (1 - sigmas) * labels + sigmas * noise
+            # Get number of conditioning frames to keep clean (no noise)
+            num_latent_cond = (
+                model.num_latent_cond if hasattr(model, "num_latent_cond") else 2
+            )
 
-            bsz, _, latent_height, latent_width = latents.shape
+            # Generate noise and timesteps for diffusion (same as training)
+            noise = torch.randn_like(latents, dtype=self._dtype)
+            timesteps = torch.rand((bsz,), dtype=self._dtype, device=self.device)
+            sigmas = timesteps.view(-1, 1, 1, 1, 1)
+            # Mix clean latents with noise based on timesteps
+            noisy_latents = (1 - sigmas) * latents + sigmas * noise
 
-            POSITION_DIM = 3  # constant for Wan flow model
-            with torch.no_grad(), torch.device(self.device):
-                # Create positional encodings
-                latent_pos_enc = create_position_encoding_for_latents(
-                    bsz, latent_height, latent_width, POSITION_DIM
+            # Masking: Keep first num_latent_cond frames clean (no noise) for conditioning
+            if num_latent_cond > 0 and latents.shape[2] > num_latent_cond:
+                noisy_latents[:, :, :num_latent_cond, :, :] = latents[
+                    :, :, :num_latent_cond, :, :
+                ]
+
+            # Compute target: noise - labels for frames that need prediction
+            target_noise_diff = noise - latents
+            if num_latent_cond > 0 and latents.shape[2] > num_latent_cond:
+                # Set target to zero for conditioning frames (no noise prediction needed)
+                target_noise_diff[:, :, :num_latent_cond, :, :] = 0.0
+            target = pack_latents(target_noise_diff)
+
+            # Prepare context parallel context if enabled
+            optional_context_parallel_ctx = None
+            if parallel_dims.cp_enabled:
+                # Pack latents for context parallel
+                latents_p = pack_latents(noisy_latents)
+                POSITION_DIM = 3
+                text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM, device=self.device)
+                
+                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                    cp_mesh=parallel_dims.get_mesh("cp"),
+                    cp_buffers=[latents_p, t5_encodings, text_pos_enc, target],
+                    cp_seq_dims=[1, 1, 1, 1],
+                    cp_no_restore_buffers={latents_p, t5_encodings, text_pos_enc, target},
+                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
                 )
-                text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
 
-                # Patchify: Convert latent into a sequence of patches
-                latents = pack_latents(latents)
-                target = pack_latents(noise - labels)
-
-                optional_context_parallel_ctx = (
-                    dist_utils.create_context_parallel_ctx(
-                        cp_mesh=parallel_dims.world_mesh["cp"],
-                        cp_buffers=[
-                            latents,
-                            latent_pos_enc,
-                            t5_encodings,
-                            text_pos_enc,
-                            target,
-                        ],
-                        cp_seq_dims=[1, 1, 1, 1, 1],
-                        cp_no_restore_buffers={
-                            latents,
-                            latent_pos_enc,
-                            t5_encodings,
-                            text_pos_enc,
-                            target,
-                        },
-                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+            # Forward pass through the model
+            with self.validation_context(optional_context_parallel_ctx):
+                with self.maybe_enable_amp:
+                    # Model forward: predict noise in latents
+                    latent_noise_pred = model(
+                        x=noisy_latents,
+                        timesteps=timesteps,
+                        context=t5_encodings,
+                        robot_states=input_dict.get("robot_states"),
                     )
-                    if parallel_dims.cp_enabled
-                    else None
+
+                    # Pack the model output to match the target format
+                    latent_noise_pred = pack_latents(latent_noise_pred)
+
+                    # Compute MSE loss between predicted noise and target
+                    batch_loss = self.loss_fn(latent_noise_pred, target)
+
+            accumulated_losses.append(batch_loss.detach())
+
+            # Set num_cond_frames for generation
+            input_dict["num_cond_frames"] = num_cond_frames
+
+            # Generate video using the diffusion model
+            generated_video = generate_video(
+                device=self.device,
+                dtype=self._dtype,
+                job_config=self.job_config,
+                model=model,
+                input_dict=input_dict,
+                wan_video_vae=self.wan_video_vae,
+                t5_tokenizer=self.t5_tokenizer,
+                t5_encoder=self.t5_encoder,
+                precomputed_t5_embedding=self.precomputed_t5_embedding,
+            )
+
+            # Save video periodically
+            output_dir = os.path.join(
+                self.job_config.job.dump_folder,
+                self.job_config.validation.save_img_folder,
+            )
+            save_video(
+                name=f"video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
+                output_dir=output_dir,
+                video=generated_video,
+                add_sampling_metadata=True,
+            )
+
+            # Compute PSNR for generated video vs ground truth
+            # Prepare ground truth: (B, T, H, W, C) uint8 [0,255] -> (B, C, T, H, W) float [-1,1]
+            gt_video = original_video_frames.float()
+            gt_video = (gt_video / 127.5) - 1.0
+            gt_video = gt_video.to(device=self.device, dtype=self._dtype)
+            gt_video = gt_video.permute(0, 4, 1, 2, 3)  # (B, T, H, W, C) -> (B, C, T, H, W)
+
+            # Save ground truth/target video for comparison
+            save_video(
+                name=f"target_video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
+                output_dir=output_dir,
+                video=gt_video,
+                add_sampling_metadata=False,
+            )
+
+            # Clamp generated video
+            gen_video = generated_video.clamp(-1.0, 1.0)
+
+            # Convert to CPU float32 for PSNR
+            gt_cpu = gt_video.cpu().float()
+            gen_cpu = gen_video.cpu().float()
+
+            B, C, T, H, W = gt_cpu.shape
+
+            # Compute PSNR for non-conditioning frames only
+            batch_psnr_values = []
+            for t in range(num_cond_frames, T):
+                gt_frame = gt_cpu[:, :, t, :, :]
+                gen_frame = gen_cpu[:, :, t, :, :]
+                psnr_frame = peak_signal_noise_ratio(
+                    gen_frame, gt_frame, data_range=2.0, reduction="none", dim=(1, 2, 3)
                 )
+                if psnr_frame.dim() == 0:
+                    psnr_frame = psnr_frame.unsqueeze(0)
+                batch_psnr_values.append(psnr_frame)
 
-                with self.validation_context(optional_context_parallel_ctx):
-                    with self.maybe_enable_amp:
-                        latent_noise_pred = model(
-                            img=latents,
-                            img_ids=latent_pos_enc,
-                            txt=t5_encodings,
-                            txt_ids=text_pos_enc,
-                            timesteps=timesteps,
-                        )
+            if batch_psnr_values:
+                batch_psnr = torch.stack(batch_psnr_values).mean()
+                all_psnr_values.append(batch_psnr)
 
-                    loss = self.loss_fn(latent_noise_pred, target)
-
-            del noise, target, latent_noise_pred, latents
-
-            accumulated_losses.append(loss.detach())
+            # Update token count for metrics
+            self.metrics_processor.ntokens_since_last_log += labels.numel()
 
             num_steps += 1
 
-        # Compute average loss
-        loss = torch.sum(torch.stack(accumulated_losses))
-        loss /= num_steps
-        if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.world_mesh["dp_cp"]
-            )
+        # Compute average MSE loss across all batches
+        if accumulated_losses:
+            avg_loss = torch.stack(accumulated_losses).mean()
         else:
-            global_avg_loss = loss.item()
+            avg_loss = torch.tensor(0.0, device=self.device, dtype=self._dtype)
 
-        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+        # Compute average PSNR across all batches
+        if all_psnr_values:
+            avg_psnr = torch.stack(all_psnr_values).mean().to(device=self.device)
+        else:
+            avg_psnr = torch.tensor(0.0, device=self.device)
+
+        # Gather across distributed processes if needed
+        if parallel_dims.dp_cp_enabled:
+            # Use "loss" mesh which includes dp_replicate, dp_shard, and cp
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            if loss_mesh is not None:
+                avg_loss = dist_utils.dist_mean(avg_loss, loss_mesh)
+                avg_psnr = dist_utils.dist_mean(avg_psnr, loss_mesh)
+
+        # Convert to Python scalars for logging
+        if isinstance(avg_loss, torch.Tensor):
+            avg_loss = avg_loss.item()
+        if isinstance(avg_psnr, torch.Tensor):
+            avg_psnr = avg_psnr.item()
+
+        # Log validation metrics
+        logger.info(f"Validation Step {step}: Loss = {avg_loss:.6f}, PSNR = {avg_psnr:.4f} dB")
+        self.metrics_processor.log_validation(
+            loss=avg_loss, 
+            step=step, 
+            extra_metrics={"validation_metrics/avg_psnr": avg_psnr}
+        )
 
         # Set model back to train mode
         model.train()
 
-        # re-enable cfg dropout for training
+        # Re-enable cfg dropout for training
         self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
 
 
@@ -337,15 +378,18 @@ if __name__ == "__main__":
     Usage:
         python -m torchtitan.experiments.wan.validate
     """
-    from torchtitan.config.manager import ConfigManager
-    from torchtitan.experiments.wan.model.wan_vae import load_wan_vae
-    from torchtitan.experiments.wan import wan_configs
     # from icecream import ic
     from PIL import Image
     from datetime import datetime
     import random
-    import numpy as np
 
+    from torchtitan.config.manager import ConfigManager
+    from torchtitan.experiments.wan.model.wan_vae import load_wan_vae
+    from torchtitan.experiments.wan import wan_configs, get_train_spec
+    from torchtitan.experiments.wan import WanModel
+
+    
+    
     # Initialize logger for standalone execution
     init_logger()
     logger.info("Starting WanValidator test script")
@@ -356,23 +400,38 @@ if __name__ == "__main__":
     job_config = config_manager.parse_args()  # Uses sys.argv automatically
     logger.info(f"Config loaded from: {job_config.job.config_file}")
     logger.info("Config loaded successfully")
-    # ic(job_config)
+    train_spec = get_train_spec()
     
-    # Get device and dtype
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+    # Initialize distributed environment (same pattern as train.py)
+    logger.info("Initializing distributed environment...")
+    world_size = dist_utils.init_distributed(
+        job_config.comm,
+        enable_cpu_backend=job_config.training.enable_cpu_offload,
+        base_folder=job_config.job.dump_folder,
+    )
+    logger.info(f"Distributed environment initialized with world_size={world_size}")
+    
+    # Get rank from distributed environment
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    logger.info(f"Global rank={rank}, local_rank={local_rank}")
+    
+    # Set device based on LOCAL_RANK (same pattern as forge/engine.py)
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    if device_type == "cuda":
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(local_rank)
+    else:
+        device = torch.device(device_type)
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     logger.info(f"Using device: {device}, dtype: {dtype}")
     
     # Create ParallelDims from config (same pattern as train.py)
-    # For standalone execution, world_size is always 1 (single process)
     parallelism_config = job_config.parallelism
-    world_size = 1  # Standalone script runs as single process
-    
-    # Use parallelism settings from config
-    # Note: For standalone execution, all parallelism degrees should be 1
-    # to match world_size=1. ParallelDims validation will enforce this.
     parallel_dims = ParallelDims(
-        dp_shard=parallelism_config.data_parallel_shard_degree if parallelism_config.data_parallel_shard_degree > 0 else 1,
+        dp_shard=parallelism_config.data_parallel_shard_degree,
         dp_replicate=parallelism_config.data_parallel_replicate_degree,
         cp=parallelism_config.context_parallel_degree,
         tp=parallelism_config.tensor_parallel_degree,
@@ -381,21 +440,36 @@ if __name__ == "__main__":
         etp=parallelism_config.expert_tensor_parallel_degree,
         world_size=world_size,
     )
+    logger.info(f"ParallelDims initialized: {parallel_dims}")
+    
+    # Extract DP world size and rank from batch mesh (same pattern as forge/engine.py)
+    if parallel_dims.dp_enabled:
+        # Original code commented out due to "Backend fake does not yet support sequence numbers" error
+        # batch_mesh = parallel_dims.get_mesh("batch")
+        # dp_world_size = batch_mesh.size()
+        # dp_rank = batch_mesh.get_local_rank()
+        # Compute batch_rank without using get_local_rank() on fake backend
+        dp_world_size = parallel_dims.dp_replicate * parallel_dims.dp_shard
+        world_rank = torch.distributed.get_rank()
+        dp_rank = (world_rank // (parallel_dims.cp * parallel_dims.tp)) % dp_world_size
+    else:
+        dp_world_size = 1
+        dp_rank = 0
+    logger.info(f"Data parallel: dp_world_size={dp_world_size}, dp_rank={dp_rank}")
     
     # Set random seeds for reproducibility using the same utility as train.py
     # This ensures consistency with training pipeline
     logger.info("Setting random seed for reproducibility...")
+    distinct_seed_mesh_dims = []
+    if parallel_dims.dp_enabled:
+        # Use distinct seeds across DP ranks like in train.py
+        distinct_seed_mesh_dims = ["dp_replicate", "fsdp"]
     dist_utils.set_determinism(
         parallel_dims=parallel_dims,
         device=device,
         debug_config=job_config.debug,
-        distinct_seed_mesh_dims=[],  # No distinct seeds needed for single-process
+        distinct_seed_mesh_dims=distinct_seed_mesh_dims,
     )
-    
-    # Set additional seeds for complete reproducibility (not handled by set_determinism for single-process)
-    seed = job_config.debug.seed if hasattr(job_config.debug, 'seed') and job_config.debug.seed is not None else 42
-    random.seed(seed)
-    np.random.seed(seed)
     
     # Build tokenizer
     logger.info("Building tokenizer...")
@@ -406,8 +480,8 @@ if __name__ == "__main__":
     logger.info("Building validator...")
     validator = build_wan_validator(
         job_config=job_config,
-        dp_world_size=1,
-        dp_rank=0,
+        dp_world_size=dp_world_size,
+        dp_rank=dp_rank,
         tokenizer=tokenizer,
         parallel_dims=parallel_dims,
         loss_fn=None,  # Not needed for dataloader test
@@ -446,7 +520,26 @@ if __name__ == "__main__":
         precomputed_t5_embedding=None,
     )
     logger.info("Validator initialized with encoders")
-    
+
+    # Load the WanModel (diffusion model)
+    logger.info("=" * 80)
+    logger.info("Loading WanModel (diffusion model)...")
+    logger.info("=" * 80)
+    model = WanModel(model_args)
+
+    # Load pretrained weights if not in test mode
+    if not job_config.training.test_mode:
+        weights_path = "assets/hf/Wan2.2-TI2V-5B"
+        logger.info(f"Loading pretrained weights from: {weights_path}")
+        model.init_weights(pretrained_weights_path=weights_path)
+        logger.info("Pretrained weights loaded successfully")
+    else:
+        logger.info("Using random initialization (test_mode=True)")
+
+    model = model.to(device=device, dtype=dtype)
+    model.eval()
+    logger.info(f"WanModel loaded and moved to {device} with dtype {dtype}")
+
     # Test the dataloader by iterating through a few batches
     logger.info("Testing validation dataloader...")
     
@@ -472,7 +565,7 @@ if __name__ == "__main__":
             latentes = latents.permute(0, 2, 1, 3, 4)
             # ic(latentes.shape)
             # TODO: fix the tiled execution path 
-            reconstructed_video = wan_video_vae.decode(hidden_states=latents, device=device, tiled=False)
+            reconstructed_video = wan_video_vae.decode(hidden_states=latents, device=device, tiled=True)
         reconstructed_video = reconstructed_video.clamp(-1.0, 1.0)
         
         # Get normalized video frames for PSNR comparison
@@ -584,23 +677,7 @@ if __name__ == "__main__":
                 frame = frame.clamp(-1.0, 1.0)
                 frame = (frame + 1.0) * 127.5  # Map [-1, 1] to [0, 255]
                 frame = frame.clamp(0, 255)
-                return frame.byte()
-            
-            # Convert frames to uint8
-            original_max_frame_uint8 = frame_to_uint8(original_max_frame)
-            reconstructed_max_frame_uint8 = frame_to_uint8(reconstructed_max_frame)
-            original_min_frame_uint8 = frame_to_uint8(original_min_frame)
-            reconstructed_min_frame_uint8 = frame_to_uint8(reconstructed_min_frame)
-            
-            # Rearrange from (C, H, W) to (H, W, C) for PIL
-            def chw_to_hwc(frame):
-                """Convert from (C, H, W) to (H, W, C)."""
-                return frame.permute(1, 2, 0)
-            
-            original_max_frame_hwc = chw_to_hwc(original_max_frame_uint8)
-            reconstructed_max_frame_hwc = chw_to_hwc(reconstructed_max_frame_uint8)
-            original_min_frame_hwc = chw_to_hwc(original_min_frame_uint8)
-            reconstructed_min_frame_hwc = chw_to_hwc(reconstructed_min_frame_uint8)
+                return frame.to(dtype=torch.uint8)
             
             # Convert to numpy and then to PIL Image
             def tensor_to_pil(tensor):
@@ -608,6 +685,18 @@ if __name__ == "__main__":
                 numpy_array = tensor.cpu().numpy()
                 return Image.fromarray(numpy_array)
             
+            # Convert frames to uint8
+            original_max_frame_uint8 = frame_to_uint8(original_max_frame)
+            reconstructed_max_frame_uint8 = frame_to_uint8(reconstructed_max_frame)
+            original_min_frame_uint8 = frame_to_uint8(original_min_frame)
+            reconstructed_min_frame_uint8 = frame_to_uint8(reconstructed_min_frame)
+            
+            original_max_frame_hwc = original_max_frame_uint8.permute(1, 2, 0)
+            reconstructed_max_frame_hwc = reconstructed_max_frame_uint8.permute(1, 2, 0)
+            original_min_frame_hwc = original_min_frame_uint8.permute(1, 2, 0)
+            reconstructed_min_frame_hwc = reconstructed_min_frame_uint8.permute(1, 2, 0)
+            
+        
             # Save highest PSNR frames
             original_max_img = tensor_to_pil(original_max_frame_hwc)
             reconstructed_max_img = tensor_to_pil(reconstructed_max_frame_hwc)
@@ -641,30 +730,109 @@ if __name__ == "__main__":
             original_min_img.save(original_min_path)
             reconstructed_min_img.save(reconstructed_min_path)
             # logger.info(f"  - Saved min PSNR frames: {original_min_path}, {reconstructed_min_path}")
-        
-        logger.info(f"\n✓ All frames saved to: {logs_dir}")
-        
-    # Optionally test preprocessing
-    logger.info("\nTesting data preprocessing...")
-    for batch_idx, (input_dict, labels) in enumerate(validator.validation_dataloader):
-        if batch_idx >= 1:  # Just test one batch
-            break
-        
-        # Add labels to input_dict as expected by preprocess_data
-        input_dict["image"] = labels
-        assert torch.all(input_dict["video_frames"] == labels)
 
-        
-        # Test preprocessing (VAE encoding + T5 encoding)
-        processed = preprocess_data(
-            device=device,
-            dtype=dtype,
-            wan_video_vae=wan_video_vae,
-            t5_encoder=t5_encoder,
-            batch=input_dict,
-            precomputed_t5_embedding=None,
+        logger.info(f"\n✓ All frames saved to: {logs_dir}")
+
+        # ========================================
+        # Video Generation Test (using diffusion model)
+        # ========================================
+        logger.info("=" * 80)
+        logger.info(f"Batch {batch_idx}: Testing video generation with diffusion model...")
+        logger.info("=" * 80)
+
+        # Set num_cond_frames for the generation
+        input_dict["num_cond_frames"] = job_config.validation.num_cond_frames
+
+        with torch.inference_mode():
+            generated_video = generate_video(
+                device=device,
+                dtype=dtype,
+                job_config=job_config,
+                model=model,
+                input_dict=input_dict,
+                wan_video_vae=wan_video_vae,
+                t5_tokenizer=validator.t5_tokenizer,
+                t5_encoder=t5_encoder,
+                precomputed_t5_embedding=None,
+            )
+
+        logger.info(f"Generated video shape: {generated_video.shape}")
+
+        # Save the generated video
+        generated_video_path = os.path.join(
+            logs_dir,
+            f"batch{batch_idx}_generated_video.mp4"
         )
-        # ic(processed.keys())
-        # ic(processed["latents"].shape)
-        # ic(processed["t5_encodings"].shape)
-        
+        save_video(
+            name=f"batch{batch_idx}_generated_video.mp4",
+            output_dir=logs_dir,
+            video=generated_video,
+            add_sampling_metadata=True,
+        )
+        logger.info(f"✓ Generated video saved to: {generated_video_path}")
+
+        # ========================================
+        # Compute PSNR for generated video
+        # ========================================
+        # Compare generated video against ground truth
+        # Only compare non-conditioning frames (the model should predict these)
+        num_cond_frames = job_config.validation.num_cond_frames
+
+        # Get ground truth video in same format as generated
+        # video_frames is (B, T, H, W, C) uint8 [0, 255]
+        # generated_video is (B, C, T, H, W) float [-1, 1]
+        gt_video = input_dict["video_frames"].float()
+        gt_video = (gt_video / 127.5) - 1.0  # Normalize to [-1, 1]
+        gt_video = gt_video.to(device=device, dtype=dtype)
+        gt_video = gt_video.permute(0, 4, 1, 2, 3)  # (B, T, H, W, C) -> (B, C, T, H, W)
+
+        # Clamp generated video to valid range
+        generated_video_clamped = generated_video.clamp(-1.0, 1.0)
+
+        # Convert to CPU float32 for PSNR calculation
+        gt_video_cpu = gt_video.cpu().float()
+        gen_video_cpu = generated_video_clamped.cpu().float()
+
+        # Calculate PSNR for non-conditioning frames only
+        # These are the frames the model actually predicted
+        B, C, T, H, W = gt_video_cpu.shape
+
+        gen_psnr_values = []
+        for t in range(num_cond_frames, T):  # Skip conditioning frames
+            gt_frame = gt_video_cpu[:, :, t, :, :]
+            gen_frame = gen_video_cpu[:, :, t, :, :]
+
+            psnr_frame = peak_signal_noise_ratio(
+                gen_frame,
+                gt_frame,
+                data_range=2.0,  # Range is [-1, 1] = 2.0
+                reduction="none",
+                dim=(1, 2, 3),
+            )
+            if psnr_frame.dim() == 0:
+                psnr_frame = psnr_frame.unsqueeze(0)
+            gen_psnr_values.append(psnr_frame)
+
+        if len(gen_psnr_values) > 0:
+            gen_psnr_tensor = torch.stack(gen_psnr_values, dim=0)  # (T-cond, B)
+            if gen_psnr_tensor.dim() == 2:
+                gen_psnr_tensor = gen_psnr_tensor.transpose(0, 1)  # (B, T-cond)
+
+            logger.info("\n" + "=" * 60)
+            logger.info("GENERATED VIDEO PSNR Results:")
+            logger.info("=" * 60)
+            logger.info(f"  - Overall PSNR (mean): {gen_psnr_tensor.mean().item():.4f} dB")
+            logger.info(f"  - PSNR min: {gen_psnr_tensor.min().item():.4f} dB")
+            logger.info(f"  - PSNR max: {gen_psnr_tensor.max().item():.4f} dB")
+            logger.info(f"  - Frames evaluated: {T - num_cond_frames} (skipped {num_cond_frames} conditioning frames)")
+            logger.info("=" * 60)
+
+            # Also compute last-frame PSNR (common metric for video prediction)
+            last_frame_psnr = peak_signal_noise_ratio(
+                gen_video_cpu[:, :, -1, :, :],
+                gt_video_cpu[:, :, -1, :, :],
+                data_range=2.0,
+            )
+            logger.info(f"  - Last frame PSNR: {last_frame_psnr.item():.4f} dB")
+        else:
+            logger.warning("No non-conditioning frames to evaluate!")   

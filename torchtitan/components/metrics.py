@@ -426,6 +426,21 @@ class MetricsProcessor:
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
+        # TODO: improve this (Wan implementation)
+        # Compute VAE/model time breakdown if available (for video models like WAN)
+        vae_time_total = sum(getattr(self, 'vae_times', [])) or 0
+        model_time_total = sum(getattr(self, 'model_times', [])) or 0
+        has_time_breakdown = vae_time_total > 0 and model_time_total > 0
+        if has_time_breakdown:
+            # Model-only MFU excludes VAE time
+            model_tps = self.ntokens_since_last_log / (
+                model_time_total * self.parallel_dims.non_data_parallel_size
+            )
+            model_mfu = 100 * self.num_flops_per_token * model_tps / self.gpu_peak_flops
+            model_tflops = self.num_flops_per_token * model_tps / 1e12
+            vae_pct = 100 * vae_time_total / time_delta
+            model_pct = 100 * model_time_total / time_delta
+
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
 
         metrics = {
@@ -449,22 +464,54 @@ class MetricsProcessor:
         if extra_metrics:
             metrics.update(extra_metrics)
 
+
+        # TODO: improve this (Wan implementation)
+        # Add VAE/model breakdown metrics if available
+        if has_time_breakdown:
+            metrics.update({
+                "time_metrics/vae(%)": vae_pct,
+                "time_metrics/model(%)": model_pct,
+                "model_only/tps": model_tps,
+                "model_only/tflops": model_tflops,
+                "model_only/mfu(%)": model_mfu,
+            })
+
         self.logger.log(metrics, step)
 
         color = self.color
-        logger.info(
-            f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:7.4f}  "
-            f"{color.orange}grad_norm: {grad_norm:7.4f}  "
-            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-            f"{color.blue}tps: {round(tps):,}  "
-            f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
-        )
+        if has_time_breakdown:
+           # TODO: improve this (Wan implementation)
+            logger.info(
+                f"{color.red}step: {step:2}  "
+                f"{color.green}loss: {global_avg_loss:7.4f}  "
+                f"{color.orange}grad_norm: {grad_norm:7.4f}  "
+                f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+                f"{color.blue}tps: {round(tps):,}  "
+                f"{color.magenta}mfu: {mfu:.2f}%  "
+                f"{color.cyan}model_mfu: {model_mfu:.2f}%  "
+                f"{color.yellow}vae: {vae_pct:.1f}%  model: {model_pct:.1f}%{color.reset}"
+            )
+        else:
+            logger.info(
+                f"{color.red}step: {step:2}  "
+                f"{color.green}loss: {global_avg_loss:7.4f}  "
+                f"{color.orange}grad_norm: {grad_norm:7.4f}  "
+                f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+                f"{color.blue}tps: {round(tps):,}  "
+                f"{color.cyan}tflops: {tflops:,.2f}  "
+                f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            )
 
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
+        # TODO: improve this (Wan implementation)
+        # Clear VAE/model times if they exist
+        if hasattr(self, 'vae_times'):
+            self.vae_times.clear()
+        if hasattr(self, 'model_times'):
+            self.model_times.clear()
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 

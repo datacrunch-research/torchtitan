@@ -485,11 +485,12 @@ def build_wan_dataloader(
 ) -> ParallelAwareDataloader:
     """
     Build a data loader for WAN video datasets.
-    
+
     Currently only supports 1xwm dataset via RawVideoDatasetWrapper.
     """
     dataset_name = job_config.training.dataset.lower()
     dataset_path = job_config.training.dataset_path
+    logger.info(f"Building TRAINING dataloader: dataset={dataset_name}, path={dataset_path}")
     batch_size = job_config.training.local_batch_size
     num_workers = job_config.training.num_workers
     persistent_workers = job_config.training.persistent_workers
@@ -542,11 +543,12 @@ def build_wan_validation_dataloader(
 ) -> ParallelAwareDataloader:
     """
     Build a data loader for WAN video validation datasets.
-    
+
     Currently only supports 1xwm dataset via RawVideoDatasetWrapper.
     """
     dataset_name = job_config.validation.dataset.lower()
     dataset_path = job_config.validation.dataset_path
+    logger.info(f"Building VALIDATION dataloader: dataset={dataset_name}, path={dataset_path}")
     batch_size = job_config.validation.local_batch_size
     # Use training dataloader settings for validation as well
     num_workers = job_config.training.num_workers

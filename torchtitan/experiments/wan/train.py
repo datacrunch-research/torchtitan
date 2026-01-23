@@ -43,6 +43,10 @@ class WanTrainer(Trainer):
         logger.info("Initializing WanTrainer...")
         logger.info("=" * 80)
         super().__init__(job_config)
+
+        # Initialize VAE/model timing lists for metrics (WAN-specific)
+        self.metrics_processor.vae_times = []
+        self.metrics_processor.model_times = []
         logger.info(
             "Base Trainer initialization completed, continuing with Wan-specific setup..."
         )
@@ -73,7 +77,7 @@ class WanTrainer(Trainer):
 
         # load components
         logger.info("=" * 80)
-        logger.info("STEP 5: Loading Wan model components (VAE, encoders)")
+        logger.info("Loading Wan model components (VAE, encoders)")
         logger.info("=" * 80)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         logger.info(f"  - Model args: {model_args}")
@@ -99,12 +103,14 @@ class WanTrainer(Trainer):
                 mode="default",  # Don't use CUDA graphs (incompatible with cache)
                 backend=job_config.compile.backend,
                 fullgraph=False,  # Allow graph breaks for cache mechanism
+                dynamic=True,  # Handle varying input sizes without recompilation
             )
             self.wan_video_vae.model.decoder = torch.compile(
                 self.wan_video_vae.model.decoder,
                 mode="default",  # Don't use CUDA graphs (incompatible with cache)
                 backend=job_config.compile.backend,
                 fullgraph=False,
+                dynamic=True,  # Handle varying input sizes without recompilation
             )
             logger.info("  ✓ VAE compiled successfully")
 
@@ -116,60 +122,61 @@ class WanTrainer(Trainer):
         ).to(device=self.device, dtype=self._dtype)
         logger.info("  ✓ T5 encoder loaded successfully")
 
+        # TODO: this part actually only parallelise T5 model that is then deleted
         # Apply FSDP to the T5 model / VAE
-        logger.info("=" * 80)
-        logger.info("STEP 6: Applying FSDP parallelization to encoders (T5, VAE)")
-        logger.info("=" * 80)
+        # logger.info("=" * 80)
+        # logger.info("Applying FSDP parallelization to encoders (T5, VAE)")
+        # logger.info("=" * 80)
         self.t5_encoder, self.wan_video_vae = parallelize_encoders(
             t5_model=self.t5_encoder,
             wan_video_vae=self.wan_video_vae,
             parallel_dims=self.parallel_dims,
             job_config=job_config,
         )
-        logger.info("  ✓ FSDP parallelization applied to encoders")
+        # logger.info("  ✓ FSDP parallelization applied to encoders")
 
         # TODO: this part should be handled better
         # Precompute empty string embeddings once to save memory and time
         # This allows T5 encoder to be offloaded since we only encode ""
         logger.info("=" * 80)
-        logger.info("STEP 7: Precomputing empty string embeddings for T5")
+        logger.info("Precomputing empty string embeddings for T5")
         logger.info("=" * 80)
-        logger.info(
-            '  - This allows encoder to be offloaded since we only encode empty strings ("")'
-        )
-        logger.info("  - T5 uses last_hidden_state for per-token embeddings")
-        logger.info(
-            "  - Precomputed embeddings will be reused during training to avoid encoder forward passes"
-        )
+        # logger.info(
+        #     '  - This allows encoder to be offloaded since we only encode empty strings ("")'
+        # )
+        # logger.info("  - T5 uses last_hidden_state for per-token embeddings")
+        # logger.info(
+        #     "  - Precomputed embeddings will be reused during training to avoid encoder forward passes"
+        # )
         with torch.no_grad():
             # Get empty string tokens
-            logger.info("  - Building tokenizer...")
+            # logger.info("  - Building tokenizer...")
             t5_tokenizer = build_wan_tokenizer(job_config)
-            logger.info("  - Encoding empty string...")
+            # logger.info("  - Encoding empty string...")
             empty_t5_tokens_tensor = t5_tokenizer.encode("").to(device=self.device)
-            logger.info(f"  - T5 tokens shape: {empty_t5_tokens_tensor.shape}")
+            # logger.info(f"  - T5 tokens shape: {empty_t5_tokens_tensor.shape}")
 
-            logger.info("  - Computing embeddings using encoder...")
+            # logger.info("  - Computing embeddings using encoder...")
             # Compute embeddings using the encoder (after FSDP wrapping)
             self._precomputed_t5_embedding = self.t5_encoder(empty_t5_tokens_tensor).to(
                 dtype=self._dtype
             )
 
-            logger.info(
-                f"  - T5 embedding shape (before squeeze): {self._precomputed_t5_embedding.shape}"
-            )
+            # logger.info(
+            #     f"  - T5 embedding shape (before squeeze): {self._precomputed_t5_embedding.shape}"
+            # )
 
             # Remove batch dimension for single sample
-            logger.info("  - Removing batch dimension...")
+            # logger.info("  - Removing batch dimension...")
             self._precomputed_t5_embedding = self._precomputed_t5_embedding.squeeze(
                 0
             )  # [seq_len, hidden_dim]
 
-            logger.info(
-                f"  - T5 embedding shape (after squeeze): {self._precomputed_t5_embedding.shape}"
-            )
+            # logger.info(
+            #     f"  - T5 embedding shape (after squeeze): {self._precomputed_t5_embedding.shape}"
+            # )
 
-        logger.info("  ✓ Empty string embeddings precomputed successfully")
+        # logger.info("  ✓ Empty string embeddings precomputed successfully")
 
         # Delete T5 encoder after precomputation to free memory
         # It's no longer needed since we use precomputed embeddings
@@ -193,7 +200,6 @@ class WanTrainer(Trainer):
                 precomputed_t5_embedding=self._precomputed_t5_embedding,
             )
             logger.info("Wan validator initialized")
-            # TODO: also here add the validation code for wan
 
         logger.info("=" * 80)
         logger.info("WanTrainer initialization completed")
@@ -215,18 +221,18 @@ class WanTrainer(Trainer):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
-            # logger.info(f"labels.shape: {labels.shape}")
-            ntokens_batch = (
-                1
-                + (labels.shape[1] - 1)
-                // 4
-                * labels.shape[2]
-                // 16
-                * labels.shape[3]
-                // 16
-            )
-
-            # logger.info(f"ntokens_batch: {ntokens_batch}")
+            # Compute transformer sequence length for MFU/TPS metrics
+            # labels.shape = (B, T, H, W, C) - Raw video frames (channels LAST)
+            # VAE downsampling: temporal (T-1)//4 + 1, spatial 16x (512->32)
+            # Patchification: patch_size=[1, 2, 2]
+            # seq_len = T_latent × (H_latent/2) × (W_latent/2)
+            batch_size = labels.shape[0]
+            T_raw, H_raw, W_raw = labels.shape[1], labels.shape[2], labels.shape[3]
+            T_latent = (T_raw - 1) // 4 + 1  # VAE temporal downsampling
+            H_latent = H_raw // 16  # VAE 16x spatial downsampling
+            W_latent = W_raw // 16
+            seq_len_per_video = T_latent * (H_latent // 2) * (W_latent // 2)
+            ntokens_batch = batch_size * seq_len_per_video
             # logger.info(f"self.ntokens_seen: {self.ntokens_seen}")
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
@@ -245,8 +251,12 @@ class WanTrainer(Trainer):
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
+
+        # TODO: MFU Computation (this is still a draft implementation it can be done better)
         # Preprocess data: generate t5 embeddings, encode video with VAE
         # Encoder may be None if it was deleted after precomputation
+        torch.cuda.synchronize()
+        vae_start = time.perf_counter()
         input_dict = preprocess_data(
             device=self.device,
             dtype=self._dtype,
@@ -255,12 +265,14 @@ class WanTrainer(Trainer):
             batch=input_dict,
             precomputed_t5_embedding=self._precomputed_t5_embedding,
         )
+        torch.cuda.synchronize()
+        vae_time = time.perf_counter() - vae_start
+        self.metrics_processor.vae_times.append(vae_time)
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         # explicitly convert flux model to be Bfloat16 no matter FSDP is applied or not
         model = self.model_parts[0]
-        # TODO: same for Wan's DiT?
 
         t5_encodings = input_dict["t5_encodings"]
         labels = input_dict["latents"]
@@ -337,7 +349,11 @@ class WanTrainer(Trainer):
             if self.parallel_dims.cp_enabled
             else None
         )
+        
+        # TODO: MFU Computation
         # Forward pass through the model
+        torch.cuda.synchronize()
+        model_start = time.perf_counter()
         with self.train_context(optional_context_parallel_ctx):
             with self.maybe_enable_amp:
                 # Model forward: predict noise in latents
@@ -359,6 +375,9 @@ class WanTrainer(Trainer):
             del (latent_noise_pred, noise, target)
             # Backward pass: compute gradients
             loss.backward()
+        torch.cuda.synchronize()
+        model_time = time.perf_counter() - model_start
+        self.metrics_processor.model_times.append(model_time)
 
         return loss
 

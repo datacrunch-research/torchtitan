@@ -21,14 +21,16 @@ from torchtitan.config import JobConfig
 from torchtitan.experiments.wan.model.wan_vae import WanVideoVAE
 from torchtitan.experiments.wan.model.hf_embedder import WanEmbedder
 from torchtitan.experiments.wan.model.model import WanModel
+from torchtitan.experiments.wan.inference.flow_match_scheduler import FlowMatchScheduler
+from torchtitan.experiments.wan.inference.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from torchtitan.experiments.wan.utils import (
-    create_position_encoding_for_latents,
+    # create_position_encoding_for_latents,
     generate_noise_latent,
-    pack_latents,
+    # pack_latents,
     preprocess_data,
-    unpack_latents,
+    # unpack_latents,
 )
-from torchtitan.tools.logging import logger
+# from torchtitan.tools.logging import logger
 
 
 # ----------------------------------------
@@ -67,6 +69,7 @@ def get_schedule(
     return timesteps.tolist()
 
 
+
 # ----------------------------------------
 #       Sampling functions
 # ----------------------------------------
@@ -82,24 +85,52 @@ def generate_video(
     t5_tokenizer: Optional[BaseTokenizer] = None,
     t5_encoder: Optional[WanEmbedder] = None,
     precomputed_t5_embedding: Optional[Tensor] = None,
+    precomputed_t5_embedding_null: Optional[Tensor] = None,
 ) -> torch.Tensor:
     """
-    Sampling and save a single video from noise.
-    For randomized noise generation, the random seed should already be set at the beginning of training.
-    Since we will always use the local random seed on this rank, we don't need to pass in the seed again.
-    """
-    # TODO: TOCHECK if this is needed
-    # allow for packing and conversion to latent space. Use the same resolution as training time.
-    img_height = 16 * (job_config.training.img_size // 16)
-    img_width = 16 * (job_config.training.img_size // 16)
+    Generate video from conditioning frames using the Wan diffusion model.
 
-    # TODO: add the cfg support
+    This function implements the full video generation pipeline:
+    1. Preprocess input data (encode video frames, get text embeddings)
+    2. Initialize noise latents
+    3. Apply conditioning frames to the latent
+    4. Run the denoising loop with FlowMatchScheduler
+    5. Decode latents to video frames
+
+    Args:
+        device: Target device for computation
+        dtype: Target dtype (typically bfloat16)
+        job_config: Job configuration containing validation settings
+        model: The WanModel diffusion model
+        input_dict: Dictionary containing:
+            - video_frames: Input video frames for conditioning
+            - robot_states: Robot state information
+            - t5_tokens: Text tokens for encoding
+            - num_cond_frames: Number of conditioning frames
+        wan_video_vae: VAE for encoding/decoding
+        t5_tokenizer: Optional T5 tokenizer
+        t5_encoder: Optional T5 encoder
+        precomputed_t5_embedding: Optional precomputed T5 embedding
+        precomputed_t5_embedding_null: Optional precomputed negative prompt embedding for CFG
+
+    Returns:
+        Generated video tensor with shape (B, C, T, H, W)
+    """
+    # Get image dimensions aligned to 16
+    img_height = job_config.training.img_size
+    img_width = job_config.training.img_size
+
+    # Get validation config
     enable_classifier_free_guidance = (
         job_config.validation.enable_classifier_free_guidance
     )
-    
-    logger.info(f"Input dict keys: {input_dict.keys()}")
+    cfg_scale = job_config.validation.classifier_free_guidance_scale
+    num_inference_steps = job_config.validation.denoising_steps
+    num_cond_frames = input_dict["num_cond_frames"]
 
+    # logger.info(f"Generating video with {num_inference_steps} steps, CFG={cfg_scale if enable_classifier_free_guidance else 'disabled'}")
+
+    # Preprocess data: encode video frames and get text embeddings
     batch = preprocess_data(
         device=device,
         dtype=dtype,
@@ -109,38 +140,45 @@ def generate_video(
         batch=input_dict,
     )
 
-    # TODO: add classifier free guidance support
-    # if enable_classifier_free_guidance:
-    #     # num_images = len(prompt)
+    # Get the conditioning latents from the encoded video
+    video_latents = batch["latents"]  # Shape: (B, z_dim, T_latent, H_latent, W_latent)
+    t5_encodings = batch["t5_encodings"]  # Shape: (B, seq_len, hidden_dim)
+    robot_states = input_dict.get("robot_states", None)
+    if robot_states is not None:
+        robot_states = robot_states.to(device=device, dtype=dtype)
 
-    #     # empty_t5_tokens = t5_tokenizer.encode("")
-    #     # empty_t5_tokens = empty_t5_tokens.repeat(num_images, 1)
+    # bsz = video_latents.shape[0]
+    z_dim = video_latents.shape[1]
+    num_frames = input_dict["video_frames"].shape[1]  # Original number of frames
 
-    #     empty_batch = preprocess_data(
-    #         device=device,
-    #         dtype=dtype,
-    #         autoencoder=None,
-    #         t5_encoder=t5_encoder,
-    #         batch={
-    #             "t5_tokens": empty_t5_tokens,
-    #         },
-    #     )
+    # logger.info(f"Video latents shape: {video_latents.shape}")
+    # logger.info(f"T5 encodings shape: {t5_encodings.shape}")
 
-    video = denoise(
+    # TODO: add to the configs the hyps for the sampler such as sigma, sample_solver, etc.
+    # Run denoising
+    latents = denoise(
         device=device,
         dtype=dtype,
         model=model,
-        input_dict=input_dict,
-        num_cond_frames=input_dict["num_cond_frames"],
-        img_width=img_width,
-        img_height=img_height,
-        denoising_steps=job_config.validation.denoising_steps,
-        t5_encodings=batch["t5_encodings"],
-        enable_classifier_free_guidance=enable_classifier_free_guidance,
-        classifier_free_guidance_scale=job_config.validation.classifier_free_guidance_scale,
+        video_latents=video_latents,
+        t5_encodings=t5_encodings,
+        robot_states=robot_states,
+        num_cond_frames=num_cond_frames,
+        num_inference_steps=num_inference_steps,
+        cfg_scale=cfg_scale if enable_classifier_free_guidance else 1.0,
+        z_dim=z_dim,
+        height=img_height,
+        width=img_width,
+        num_frames=num_frames,
+        upsampling_factor=wan_video_vae.upsampling_factor,
+        t5_encodings_null=precomputed_t5_embedding_null,
     )
 
-    video = wan_video_vae.decode(video, device=device)
+    # Decode latents to video
+    # logger.info(f"Decoding latents with shape: {latents.shape}")
+    video = wan_video_vae.decode(latents, device=device)
+    # logger.info(f"Decoded video shape: {video.shape}")
+
     return video
 
 
@@ -148,90 +186,196 @@ def denoise(
     device: torch.device,
     dtype: torch.dtype,
     model: WanModel,
-    input_dict: dict[str, Any],
-    num_cond_frames: int,
-    img_width: int,
-    img_height: int,
-    denoising_steps: int,
+    video_latents: torch.Tensor,
     t5_encodings: torch.Tensor,
-    enable_classifier_free_guidance: bool = False,
-    empty_t5_encodings: torch.Tensor | None = None,
-    classifier_free_guidance_scale: float | None = None,
+    robot_states: Optional[torch.Tensor],
+    num_cond_frames: int,
+    num_inference_steps: int,
+    cfg_scale: float,
+    z_dim: int,
+    height: int,
+    width: int,
+    num_frames: int,
+    upsampling_factor: int,
+    sigma_shift: float = 5.0,
+    sample_solver: str = 'unipc',
+    t5_encodings_null: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Sampling images from noise using a given prompt, by running inference with trained Wan model.
-    Save the generated images to the given output path.
+    Denoise latents using the FlowMatchScheduler.
+
+    This implements the denoising loop following the original Wan TI2V approach:
+    1. Initialize noise latents
+    2. Create conditioning mask (0 for cond frames, 1 for gen frames)
+    3. Apply conditioning frames to the latent using mask
+    4. For each timestep:
+       - Pass num_cond_frames to model (model creates per-token timesteps internally)
+       - Run model forward pass
+       - Apply CFG if enabled
+       - Update latents with scheduler step
+       - Reapply conditioning frames using mask
+
+    Args:
+        device: Target device
+        dtype: Target dtype
+        model: WanModel diffusion model
+        video_latents: Encoded video latents for conditioning (B, z_dim, T, H, W)
+        t5_encodings: Text embeddings (B, seq_len, hidden_dim)
+        robot_states: Optional robot state tensor
+        num_cond_frames: Number of conditioning frames
+        num_inference_steps: Number of denoising steps
+        cfg_scale: Classifier-free guidance scale (1.0 = no CFG)
+        z_dim: Latent channel dimension
+        img_height: Image height in pixels
+        img_width: Image width in pixels
+        num_frames: Number of video frames
+        upsampling_factor: VAE upsampling factor
+        sigma_shift: Shift parameter for FlowMatchScheduler
+        t5_encodings_null: Negative prompt embeddings for CFG unconditional pass.
+                          If None and cfg_scale != 1.0, uses same as t5_encodings.
+
+    Returns:
+        Denoised latents with shape (B, z_dim, T_latent, H_latent, W_latent)
     """
-    bsz = t5_encodings.shape[0]
-    latents = generate_noise_latent(bsz, img_height, img_width, device, dtype)
-    # logger.info(f"Generated noise latents: {latents.shape}")
+    bsz = video_latents.shape[0]
 
-    _, latent_channels, latent_temp_dim, latent_height, latent_width = latents.shape
-    # logger.info(f"input_dict Latent shape: {input_dict["latents"].shape}")
-    # logger.info(f"latent shape: {latents.shape}")
+    # Initialize scheduler
+    if sample_solver == 'unipc':
+        # Use UniPC scheduler (same as original Wan2.2) for better quality
+        scheduler = FlowUniPCMultistepScheduler(
+            num_train_timesteps=1000,
+            shift=1,
+            use_dynamic_shifting=False,
+        )
+        scheduler.set_timesteps(num_inference_steps, device=device, shift=sigma_shift)
+        timesteps = scheduler.timesteps
+    else:
+        # Use simple FlowMatchScheduler (faster but lower quality)
+        scheduler = FlowMatchScheduler(
+            shift=sigma_shift,
+            sigma_min=0.0,
+            extra_one_step=True,
+        )
+        scheduler.set_timesteps(num_inference_steps, shift=sigma_shift)
+        timesteps = scheduler.timesteps
 
-    # Addining the conditioning part on the first 
-    cond_idxs = 1 + (num_cond_frames-1) // 4 
-    conditioning  = input_dict["latents"][:, :, 0:cond_idxs]
+    # Initialize noise latents with same shape as video_latents
+    noise = generate_noise_latent(
+        bsz=bsz,
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        device=device,
+        dtype=dtype,
+        z_dim=z_dim
+    )
 
-    # create denoising schedule
-    timesteps = get_schedule(denoising_steps, latent_height * latent_width, shift=True)
+    # Calculate number of conditioning latent frames
+    # TODO: this may change when we will move to support also WanVAE-2.1
+    num_cond_latents = (num_cond_frames - 1) // 4 + 1
 
-    if enable_classifier_free_guidance:
-        # Double batch size for CFG: [unconditional, conditional]
-        latents = torch.cat([latents, latents], dim=0)
-        t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
-        bsz *= 2
+    # ========================================================================
+    # OLD APPROACH (simple slice assignment, no mask):
+    # ========================================================================
+    # # Initialize with random noise, then set conditioning
+    # latents = torch.randn_like(video_latents)
+    # cond_idxs = 1 + num_cond_frames // 4
+    # latents[:, :, 0:cond_idxs] = video_latents[:, :, 0:cond_idxs]
+    # ========================================================================
 
-    # create positional encodings
-    POSITION_DIM = 3
-    latent_pos_enc = create_position_encoding_for_latents(
-        bsz, latent_height, latent_width, POSITION_DIM
-    ).to(latents)
-    text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
+    # ========================================================================
+    # NEW APPROACH (following original Wan TI2V with mask):
+    # ========================================================================
+    # Create conditioning mask: 0 for conditioning frames, 1 for frames to generate
+    # Shape: (B, C, T, H, W)
+    mask = torch.ones_like(noise)
+    mask[:, :, :num_cond_latents, :, :] = 0.0
 
-    # convert img-like latents into sequences of patches
-    # latents = pack_latents(latents)
+    # Initialize latents: conditioning frames from encoded video, rest is noise
+    # latents = (1 - mask) * video_latents + mask * noise
+    latents = (1.0 - mask) * video_latents + mask * noise
 
-    # this is ignored for schnell
-    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
-        t_vec = torch.full((bsz,), t_curr, dtype=dtype, device=device)
-        latents[:, :, 0:cond_idxs] = conditioning
-        # logger.info(f"Latents shape after conditioning: {latents.shape}")
+    # Compute per-token timesteps externally (like Wan2.2 video2video.py)
+    # mask[:, :, :num_cond_latents] = 0, rest = 1
+    # After spatial downsampling by 2 (patch_size), we get per-patch timesteps
+    # Take first channel of mask, downsample spatially by 2
+    latent_t, latent_h, latent_w = video_latents.shape[2], video_latents.shape[3], video_latents.shape[4]
+    seq_len = latent_t * (latent_h // 2) * (latent_w // 2)
 
-        pred = model(
+    # Create mask for per-token timesteps: shape [T, H//2, W//2]
+    ts_mask = torch.ones(latent_t, latent_h // 2, latent_w // 2, device=device, dtype=dtype)
+    ts_mask[:num_cond_latents, :, :] = 0.0
+
+    # Denoising loop
+    for progress_id, timestep in enumerate(timesteps):
+        # Compute per-token timesteps using mask (like Wan2.2)
+        # Conditioning tokens get 0, generation tokens get current timestep
+        per_token_ts = (ts_mask * timestep).flatten()  # [seq_len]
+        # Pad if needed
+        if per_token_ts.size(0) < seq_len:
+            per_token_ts = torch.cat([
+                per_token_ts,
+                per_token_ts.new_ones(seq_len - per_token_ts.size(0)) * timestep
+            ])
+        per_token_ts = per_token_ts.unsqueeze(0).expand(bsz, -1)  # [B, seq_len]
+
+        # Forward pass - conditional
+        # Pass per-token timesteps directly (model should NOT recompute them)
+        noise_pred_cond = model(
             x=latents,
-            timesteps=t_vec,
+            timesteps=per_token_ts,  # Per-token timesteps [B, seq_len]
             context=t5_encodings,
-            robot_states=input_dict["robot_states"],
+            robot_states=robot_states,
+            num_cond_latents=None,  # Don't use internal per-token timestep computation
         )
 
-        # logger.info(f"Pred shape: {pred.shape}")
-        # logger.info(f"Pred dtype: {pred.dtype}")
-        # logger.info(f"Pred device: {pred.device}")
+        # Apply classifier-free guidance if scale != 1.0
+        if cfg_scale != 1.0:
+            # Use negative prompt embedding for unconditional pass (like Wan2.2)
+            # If no negative prompt provided, fall back to same embeddings
+            context_uncond = t5_encodings_null if t5_encodings_null is not None else t5_encodings
+            noise_pred_uncond = model(
+                x=latents,
+                timesteps=per_token_ts,  # Use same per-token timesteps
+                context=context_uncond,  # Use negative prompt embedding
+                robot_states=None,  # No robot conditioning for unconditional
+                num_cond_latents=None,
+            )
+            # CFG formula: pred = pred_uncond + scale * (pred_cond - pred_uncond)
+            noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+        else:
+            noise_pred = noise_pred_cond
 
-        if enable_classifier_free_guidance:
-            pred_u, pred_c = pred.chunk(2)
-            pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
+        # Scheduler step: update latents
+        if sample_solver == 'unipc':
+            # UniPC scheduler expects different API
+            step_output = scheduler.step(
+                noise_pred,
+                timestep,
+                latents,
+                return_dict=False,
+            )
+            latents = step_output[0] if isinstance(step_output, tuple) else step_output.prev_sample
+        else:
+            # Simple FlowMatchScheduler
+            latents = scheduler.step(noise_pred, timesteps[progress_id], latents)
 
-            # repeat along batch dimension to update both unconditional and conditional latents
-            pred = pred.repeat(2, 1, 1)
+        # ====================================================================
+        # OLD APPROACH (simple slice re-assignment):
+        # ====================================================================
+        # latents[:, :, 0:cond_idxs] = video_latents[:, :, 0:cond_idxs]
+        # ====================================================================
 
-        latents[:, :, cond_idxs:] = latents[:, :, cond_idxs:] + (t_prev - t_curr) * pred[:, :, cond_idxs:]
-
-    # take the conditional latents for the final result
-    if enable_classifier_free_guidance:
-        latents = latents.chunk(2)[1]
-
-    # TODO: TOCHECK where this is done in the model/original code
-    # convert sequences of patches into img-like latents
-    # logger.info(f"Latents shape before unpacking: {latents.shape}")
-    # latents = unpack_latents(latents, latent_height, latent_width)
+        # ====================================================================
+        # NEW APPROACH (mask-based re-application):
+        # ====================================================================
+        # Reapply conditioning frames using mask
+        # Keep encoded conditioning frames fixed, only update generation frames
+        latents = (1.0 - mask) * video_latents + mask * latents
 
     return latents
 
 
-# TODO: Remove this function 
 def save_image(
     name: str,
     output_dir: str,
@@ -274,8 +418,8 @@ def save_video(
                Values should be in range [-1, 1] (float32)
         add_sampling_metadata: Whether to add metadata (currently unused, kept for API compatibility)
     """
-    logger.info(f"Saving video to {output_dir}/{name}")
-    logger.info(f"Video shape: {video.shape}, dtype: {video.dtype}, device: {video.device}")
+    # logger.info(f"Saving video to {output_dir}/{name}")
+    # logger.info(f"Video shape: {video.shape}, dtype: {video.dtype}, device: {video.device}")
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -304,4 +448,3 @@ def save_video(
     # fps: frames per second (default to 8 fps, adjust as needed)
     fps = 8.0
     torchvision.io.write_video(output_name, video_np, fps=fps, video_codec="libx264")
-    logger.info(f"✓ Video saved successfully: {output_name}")
