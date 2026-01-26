@@ -112,16 +112,17 @@ class ParallelDims:
         ):
             """Unflatten the world mesh to create the required mesh dimensions.
 
-            Uses fake backend for dimensions with degree 1 or for 'batch' dimension
-            to avoid unnecessary process group creation.
+            Note: Fake backend disabled for PyTorch nightly compatibility.
+            PyTorch nightly no longer supports sequence numbers with fake backend.
             """
-            backend_override = {}
-            for name, degree in zip(dim_names, dim_degrees, strict=True):
-                if not self._mesh_exist(name, degree):
-                    backend_override[name] = "fake"
+            # Disable fake backend for PyTorch nightly compatibility
+            # backend_override = {}
+            # for name, degree in zip(dim_names, dim_degrees, strict=True):
+            #     if not self._mesh_exist(name, degree):
+            #         backend_override[name] = "fake"
 
             return world_mesh._unflatten(
-                0, dim_degrees, dim_names, backend_override=backend_override
+                0, dim_degrees, dim_names  # , backend_override=backend_override
             )
 
         logger.info(

@@ -1,0 +1,72 @@
+# Custom config for H200 with Float8 and compile enabled
+# Based on llama3-8b H200 benchmark
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 8B training with Float8"
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 1000000
+
+[metrics]
+log_freq = 10
+enable_tensorboard = true
+save_tb_folder = "tb"
+enable_wandb = true
+
+[model]
+name = "llama3"
+flavor = "8B"
+hf_assets_path = "./assets/hf/Llama-3.1-8B"
+converters = ["quantize.linear.float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 200
+
+[training]
+local_batch_size = 6
+seq_len = 16384
+max_norm = 1.0
+steps = 2000
+dataset = "c4"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "disabled"
+
+[compile]
+enable = true
+components = ["model", "loss"]
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = "op"
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
+filter_fqns = ["output"]
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 500
+steps = 1200

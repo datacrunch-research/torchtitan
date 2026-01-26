@@ -106,6 +106,12 @@ def get_peak_flops(device_name: str) -> float:
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
         return 2.25e15
+    elif "GB300" in device_name:
+        # data from https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-datasheet
+        return 2.5e15
+    elif "B300" in device_name:
+        # data from https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-datasheet
+        return 2.25e15
     elif "MI355X" in device_name:
         # MI355X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
         return 2500e12

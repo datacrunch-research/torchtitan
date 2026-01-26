@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  torchtitan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: torchtitan:latest
+    container_name: torchtitan
+    runtime: nvidia
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NCCL_DEBUG=INFO
+      - TORCH_DISTRIBUTED_DEBUG=DETAIL
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
+    volumes:
+      - ./:/workspace/torchtitan
+      - ./checkpoints:/workspace/checkpoints
+      - ./outputs:/workspace/outputs
+    working_dir: /workspace/torchtitan
+    stdin_open: true
+    tty: true
+    command: /bin/bash
