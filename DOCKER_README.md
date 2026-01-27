@@ -3,26 +3,11 @@
 ## Building the Docker Image
 
 ```bash
-docker login nvcr.io
 docker build -t torchtitan:latest .
-```
-
-Or using docker-compose:
-
-```bash
-docker-compose build
 ```
 
 ## Running Training
 
-### Option 1: Using Docker Compose (Recommended)
-Start the container:
-```bash
-docker-compose up -d
-docker-compose exec torchtitan bash
-```
-
-### Option 2: Using Docker Run
 Single-node, 8 GPUs:
 ```bash
 docker run --gpus all -it --rm \
@@ -41,6 +26,7 @@ wandb login
 hf auth login
 python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer
 ```
+
 ```bash
 # to avoid all the debug logs
 export NCCL_DEBUG=WARN
