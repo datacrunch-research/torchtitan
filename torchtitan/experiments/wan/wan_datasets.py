@@ -6,11 +6,11 @@
 
 import pickle
 from pathlib import Path
+
 # import icecream
 from typing import Any, Callable, Optional
 
 import torch
-
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -262,13 +262,19 @@ class LatentDatasetWrapper(IterableDataset, Stateful):
         # Split indices across data parallel ranks
         indices_per_rank = self._dataset_len // dp_world_size
         start_idx = dp_rank * indices_per_rank
-        end_idx = start_idx + indices_per_rank if dp_rank < dp_world_size - 1 else self._dataset_len
+        end_idx = (
+            start_idx + indices_per_rank
+            if dp_rank < dp_world_size - 1
+            else self._dataset_len
+        )
 
         self._all_indices = all_indices
         self._start_idx = start_idx
         self._end_idx = end_idx
         self._my_indices = all_indices[start_idx:end_idx]
-        logger.info(f"  DP sharding: rank {dp_rank} gets indices [{start_idx}:{end_idx}] ({len(self._my_indices)} samples)")
+        logger.info(
+            f"  DP sharding: rank {dp_rank} gets indices [{start_idx}:{end_idx}] ({len(self._my_indices)} samples)"
+        )
 
         # Load raw dataset for robot_states only
         # We need the same clip extraction logic to get aligned robot states
@@ -276,7 +282,9 @@ class LatentDatasetWrapper(IterableDataset, Stateful):
         downsampled = getattr(job_config.training, "downsampled", 4)
         clip_length = getattr(job_config.training, "clip_length", 77)
         window_size = getattr(job_config.training, "window_size", 8)
-        robot_temporal_mode = getattr(job_config.training, "robot_temporal_mode", "downsample")
+        robot_temporal_mode = getattr(
+            job_config.training, "robot_temporal_mode", "downsample"
+        )
 
         self._raw_dataset = BaseRawVideoDataset(
             data_dir=raw_dataset_path,
@@ -518,7 +526,7 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
     def state_dict(self):
         """Save checkpoint state."""
         return {"sample_idx": self._sample_idx}
-    
+
     def __len__(self):
         return len(self._raw_dataset)
 
@@ -687,20 +695,28 @@ class ValidationLatentDatasetWrapper(IterableDataset, Stateful):
         # Split indices across data parallel ranks
         indices_per_rank = self._dataset_len // dp_world_size
         start_idx = dp_rank * indices_per_rank
-        end_idx = start_idx + indices_per_rank if dp_rank < dp_world_size - 1 else self._dataset_len
+        end_idx = (
+            start_idx + indices_per_rank
+            if dp_rank < dp_world_size - 1
+            else self._dataset_len
+        )
 
         self._all_indices = all_indices
         self._start_idx = start_idx
         self._end_idx = end_idx
         self._my_indices = all_indices[start_idx:end_idx]
-        logger.info(f"  DP sharding: rank {dp_rank} gets indices [{start_idx}:{end_idx}] ({len(self._my_indices)} samples)")
+        logger.info(
+            f"  DP sharding: rank {dp_rank} gets indices [{start_idx}:{end_idx}] ({len(self._my_indices)} samples)"
+        )
 
         # Load raw dataset for video_frames and robot_states
         logger.info("  Loading raw dataset for video_frames and robot_states...")
         downsampled = getattr(job_config.training, "downsampled", 4)
         clip_length = getattr(job_config.training, "clip_length", 77)
         window_size = getattr(job_config.training, "window_size", 8)
-        robot_temporal_mode = getattr(job_config.training, "robot_temporal_mode", "downsample")
+        robot_temporal_mode = getattr(
+            job_config.training, "robot_temporal_mode", "downsample"
+        )
 
         self._raw_dataset = BaseRawVideoDataset(
             data_dir=raw_dataset_path,

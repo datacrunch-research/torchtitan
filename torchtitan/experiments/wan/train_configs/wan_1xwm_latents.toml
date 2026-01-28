@@ -56,12 +56,10 @@ robot_temporal_mode = "downsample"
 num_workers = 8
 persistent_workers = true
 pin_memory = true
-prefetch_factor = 2
+prefetch_factor = 1
 dtype = "bfloat16"
 # PRE-ENCODED LATENTS CONFIG
 latents_path = "./dataset/world_model_raw_data/train_v2.0_latents"
-cache_latents = false  # Disabled when using latents from disk
-cache_latents_max_samples = 0
 overfit_single_sample = true
 
 [encoder]

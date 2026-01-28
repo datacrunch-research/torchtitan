@@ -21,7 +21,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
-
 def parallelize_wan(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -169,7 +168,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
             backend=compile_config.backend,
             # fullgraph=True,
             # dynamic=True,
-            mode="max-autotune-no-cudagraphs",  
+            mode="max-autotune-no-cudagraphs",
             # Autotune without CUDA graphs (compatible with activation checkpointing)
         )
         model.blocks.register_module(layer_id, compiled_block)

@@ -67,7 +67,9 @@ wan_configs = {
 }
 
 
-def _build_wan_dataloader_dispatch(dp_world_size, dp_rank, job_config, tokenizer, infinite=True):
+def _build_wan_dataloader_dispatch(
+    dp_world_size, dp_rank, job_config, tokenizer, infinite=True
+):
     """
     Dispatch to the appropriate dataloader based on config.
 

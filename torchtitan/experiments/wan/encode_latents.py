@@ -6,6 +6,7 @@
 
 # Disable CUDA graphs before any torch imports (for torch.compile compatibility with VAE cache)
 import os
+
 os.environ["TORCHINDUCTOR_CUDAGRAPH_TREES"] = "0"
 
 """
@@ -30,8 +31,8 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, Subset
 from icecream import ic
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 ic.configureOutput(includeContext=True)
@@ -53,8 +54,9 @@ def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-from torchtitan.experiments.wan.model.wan_vae import load_wan_vae, WanVAEParams
+
 from torchtitan.experiments.wan.model.dataset import RawVideoDataset
+from torchtitan.experiments.wan.model.wan_vae import load_wan_vae, WanVAEParams
 
 
 def parse_args():
@@ -232,7 +234,11 @@ def main():
 
     # Determine range to encode
     start_idx = args.start_idx
-    end_idx = min(start_idx + args.num_samples, dataset_size) if args.num_samples > 0 else dataset_size
+    end_idx = (
+        min(start_idx + args.num_samples, dataset_size)
+        if args.num_samples > 0
+        else dataset_size
+    )
     total_to_encode = end_idx - start_idx
 
     # Distribute work across ranks - each rank handles indices where idx % world_size == rank
@@ -253,7 +259,13 @@ def main():
     # Custom collate function to return indices along with data
     def collate_with_indices(batch):
         # batch is a list of (video_frames, robot_states) tuples
-        videos = torch.stack([b[0] if isinstance(b[0], torch.Tensor) else torch.from_numpy(b[0]) for b in batch], dim=0)
+        videos = torch.stack(
+            [
+                b[0] if isinstance(b[0], torch.Tensor) else torch.from_numpy(b[0])
+                for b in batch
+            ],
+            dim=0,
+        )
         return videos
 
     # Create DataLoader with parallel workers
@@ -271,7 +283,9 @@ def main():
     dataloader = DataLoader(subset_dataset, **loader_kwargs)
 
     if is_main:
-        print(f"  DataLoader created with {args.num_workers} workers, prefetch={args.prefetch_factor}")
+        print(
+            f"  DataLoader created with {args.num_workers} workers, prefetch={args.prefetch_factor}"
+        )
 
     # Encoding loop
     encode_start = time.perf_counter()
@@ -304,12 +318,18 @@ def main():
 
             # Stack only videos that need encoding
             videos_batch = torch.stack(videos_to_encode, dim=0)  # (B, T, H, W, C)
-            videos_batch = videos_batch.to(device=device, dtype=dtype, non_blocking=True)
-            videos_batch = videos_batch.permute(0, 1, 4, 2, 3)  # (B, T, H, W, C) -> (B, T, C, H, W)
+            videos_batch = videos_batch.to(
+                device=device, dtype=dtype, non_blocking=True
+            )
+            videos_batch = videos_batch.permute(
+                0, 1, 4, 2, 3
+            )  # (B, T, H, W, C) -> (B, T, C, H, W)
 
             # Normalize from [0, 255] to [-1, 1]
             videos_batch = videos_batch * (2.0 / 255.0) - 1.0
-            videos_batch = videos_batch.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
+            videos_batch = videos_batch.transpose(
+                1, 2
+            )  # (B, T, C, H, W) -> (B, C, T, H, W)
 
             # Encode with VAE
             latents = vae.encode(videos_batch, device=device, tiled=False)
@@ -324,7 +344,10 @@ def main():
                 else:
                     # safetensors format
                     from safetensors.torch import save_file
-                    save_file({"latent": latent}, output_path.with_suffix(".safetensors"))
+
+                    save_file(
+                        {"latent": latent}, output_path.with_suffix(".safetensors")
+                    )
 
                 encoded_count += 1
 
@@ -345,7 +368,9 @@ def main():
         print("=" * 80)
         print(f"  Encoded by this rank: {encoded_count} samples")
         print(f"  Skipped (existing): {skipped_count} samples")
-        print(f"  Time: {encode_time:.1f}s ({encoded_count / max(encode_time, 0.1):.1f} samples/sec)")
+        print(
+            f"  Time: {encode_time:.1f}s ({encoded_count / max(encode_time, 0.1):.1f} samples/sec)"
+        )
         print(f"  Output: {args.output_dir}")
 
     # Save metadata (only main rank)

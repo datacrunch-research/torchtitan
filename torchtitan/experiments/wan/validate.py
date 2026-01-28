@@ -108,12 +108,17 @@ class WanValidator(Validator):
 
         # Overfit mode: use same batch as training for validation
         self._overfit_batch: tuple[dict[str, Tensor], Tensor] | None = None
-        self._overfit_mode = getattr(self.job_config.training, "overfit_single_sample", True)
+        self._overfit_mode = getattr(
+            self.job_config.training, "overfit_single_sample", True
+        )
 
     def set_overfit_batch(self, input_dict: dict[str, Tensor], labels: Tensor) -> None:
         """Set the cached batch for overfit mode validation."""
         self._overfit_batch = (
-            {k: v.clone() if isinstance(v, Tensor) else v for k, v in input_dict.items()},
+            {
+                k: v.clone() if isinstance(v, Tensor) else v
+                for k, v in input_dict.items()
+            },
             labels.clone(),
         )
         logger.info("Validator: cached overfit batch for validation")
@@ -152,7 +157,9 @@ class WanValidator(Validator):
             logger.info("Validation using OVERFIT batch (same as training)")
             data_source = [self._overfit_batch]  # Single-item iterator
         else:
-            logger.info(f"len(validation_dataloader): {len(self.validation_dataloader)}")
+            logger.info(
+                f"len(validation_dataloader): {len(self.validation_dataloader)}"
+            )
             data_source = self.validation_dataloader
 
         for input_dict, labels in data_source:
@@ -164,19 +171,27 @@ class WanValidator(Validator):
 
             # Overfit mode: clone tensors to avoid mutation
             if self._overfit_mode and self._overfit_batch is not None:
-                input_dict = {k: v.clone() if isinstance(v, Tensor) else v for k, v in input_dict.items()}
+                input_dict = {
+                    k: v.clone() if isinstance(v, Tensor) else v
+                    for k, v in input_dict.items()
+                }
                 labels = labels.clone()
 
                 # When overfit_single_sample=True, use only first element (bsz=1) for validation
                 if self.job_config.training.overfit_single_sample:
-                    input_dict = {k: v[:1] if isinstance(v, Tensor) else v for k, v in input_dict.items()}
+                    input_dict = {
+                        k: v[:1] if isinstance(v, Tensor) else v
+                        for k, v in input_dict.items()
+                    }
                     labels = labels[:1]
 
             # Check if we have video frames (not available when using pre-encoded latents)
             has_video_frames = "video_frames" in input_dict
 
             # Store original video frames for PSNR computation (if available)
-            original_video_frames = input_dict["video_frames"].clone() if has_video_frames else None
+            original_video_frames = (
+                input_dict["video_frames"].clone() if has_video_frames else None
+            )
 
             # Compute MSE loss similar to training
             # Preprocess data: generate t5 embeddings, encode video with VAE
@@ -324,7 +339,11 @@ class WanValidator(Validator):
                     gt_frame = gt_cpu[:, :, t, :, :]
                     gen_frame = gen_cpu[:, :, t, :, :]
                     psnr_frame = peak_signal_noise_ratio(
-                        gen_frame, gt_frame, data_range=2.0, reduction="none", dim=(1, 2, 3)
+                        gen_frame,
+                        gt_frame,
+                        data_range=2.0,
+                        reduction="none",
+                        dim=(1, 2, 3),
                     )
                     if psnr_frame.dim() == 0:
                         psnr_frame = psnr_frame.unsqueeze(0)
@@ -398,7 +417,11 @@ class WanValidator(Validator):
                     gt_frame = gt_cpu[:, :, t, :, :]
                     gen_frame = gen_cpu[:, :, t, :, :]
                     psnr_frame = peak_signal_noise_ratio(
-                        gen_frame, gt_frame, data_range=2.0, reduction="none", dim=(1, 2, 3)
+                        gen_frame,
+                        gt_frame,
+                        data_range=2.0,
+                        reduction="none",
+                        dim=(1, 2, 3),
                     )
                     if psnr_frame.dim() == 0:
                         psnr_frame = psnr_frame.unsqueeze(0)

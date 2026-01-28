@@ -51,7 +51,7 @@ class Training:
     latents_path: str = ""
     """
     Path to pre-encoded latents directory. If set, loads latents from disk instead of
-    encoding videos with VAE on-the-fly. 
+    encoding videos with VAE on-the-fly.
     Each file should be named latent_XXXXXXXX.pt containing tensor (C, T, H, W).
     Leave empty to use raw videos with VAE encoding.
     """
