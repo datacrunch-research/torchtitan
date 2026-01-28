@@ -23,6 +23,7 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+# from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -311,6 +312,24 @@ def build_optimizers(
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
     }
+
+    # # torchao quantized optimizers (FSDP2/DTensor compatible)
+    # if name in ["AdamW8bit", "AdamW4bit", "AdamWFp8"]:
+    #     try:
+    #         from torchao.optim import AdamW8bit, AdamW4bit, AdamWFp8
+    #         optimizer_classes["AdamW8bit"] = AdamW8bit
+    #         optimizer_classes["AdamW4bit"] = AdamW4bit
+    #         optimizer_classes["AdamWFp8"] = AdamWFp8
+    #         # torchao optimizers don't support fused/foreach
+    #         optimizer_kwargs.pop("fused", None)
+    #         optimizer_kwargs.pop("foreach", None)
+    #         logger.info(f"Using quantized optimizer: {name} (torchao)")
+    #         logger.info(f"  - Optimizer states will use less memory than FP32")
+    #     except ImportError:
+    #         raise ImportError(
+    #             f"torchao is required for {name}. Install with: pip install torchao"
+    #         )
+
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
     optimizer_cls = optimizer_classes[name]

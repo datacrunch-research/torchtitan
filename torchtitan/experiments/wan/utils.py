@@ -158,22 +158,29 @@ def preprocess_data(
             seq_len=512,
         )
 
-    # First move to GPU (keeping original dtype to minimize CPU-GPU transfer)
-    # Then convert dtype on GPU for better performance
-    videos = batch["video_frames"].to(device=device, dtype=dtype)
-    # Permute from (B, T, H, W, C) to (B, T, C, H, W)
-    videos = videos.permute(0, 1, 4, 2, 3)
-    # Normalize video frames from [0, 255] range to [-1, 1] range
-    max_value = 1.0
-    min_value = -1.0
-    videos = videos * ((max_value - min_value) / 255.0) + min_value
-    videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
+    # Check if latents are already pre-loaded (from LatentDatasetWrapper or ValidationLatentDatasetWrapper)
+    if "latents" in batch and batch["latents"] is not None:
+        # Use pre-loaded latents - skip VAE encoding entirely
+        logger.debug("Using pre-loaded latents, skipping VAE encoding")
+        video_latents = batch["latents"].to(device=device, dtype=dtype)
+    else:
+        # First move to GPU (keeping original dtype to minimize CPU-GPU transfer)
+        # Then convert dtype on GPU for better performance
+        videos = batch["video_frames"].to(device=device, dtype=dtype)
+        # Permute from (B, T, H, W, C) to (B, T, C, H, W)
+        videos = videos.permute(0, 1, 4, 2, 3)
+        # Normalize video frames from [0, 255] range to [-1, 1] range
+        max_value = 1.0
+        min_value = -1.0
+        videos = videos * ((max_value - min_value) / 255.0) + min_value
+        videos = videos.transpose(1, 2)  # (B, T, C, H, W) -> (B, C, T, H, W)
 
-    video_latents = wan_video_vae.encode(
-        videos,  # Batched tensor (B, C, T, H, W)
-        device=device,
-        tiled=False,
-    )
+        video_latents = wan_video_vae.encode(
+            videos,  # Batched tensor (B, C, T, H, W)
+            device=device,
+            tiled=False,
+        )
+
     batch["latents"] = video_latents.to(device=device, dtype=dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
     return batch

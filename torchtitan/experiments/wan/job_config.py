@@ -48,6 +48,19 @@ class Training:
     Higher values can improve GPU utilization by overlapping data loading with computation,
     but will use more memory. Only effective when num_workers > 0.
     """
+    latents_path: str = ""
+    """
+    Path to pre-encoded latents directory. If set, loads latents from disk instead of
+    encoding videos with VAE on-the-fly. 
+    Each file should be named latent_XXXXXXXX.pt containing tensor (C, T, H, W).
+    Leave empty to use raw videos with VAE encoding.
+    """
+    overfit_single_sample: bool = False
+    """
+    Debug mode: cache the first batch and reuse it for all training steps.
+    Use this to verify the loss function is working correctly - loss should
+    decrease to near zero as the model memorizes the single sample.
+    """
 
 
 @dataclass
@@ -89,6 +102,13 @@ class Validation:
     """Whether to generate all stratified timesteps per sample or use round robin"""
     num_cond_frames: int = 5
     """Number of frames to condition on"""
+    latents_path: str = ""
+    """
+    Path to pre-encoded validation latents directory. If set, loads latents from disk
+    instead of encoding videos with VAE on-the-fly. This significantly speeds up validation.
+    Each file should be named latent_XXXXXXXX.pt containing tensor (C, T, H, W).
+    Leave empty to use raw videos with VAE encoding.
+    """
 
 
 @dataclass

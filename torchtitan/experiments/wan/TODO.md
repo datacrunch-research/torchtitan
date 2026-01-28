@@ -10,6 +10,19 @@ Run the train w/:
 torchrun --nproc_per_node=4 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3 --log-dir=./logs/debug -m torchtitan.experiments.wan.train --job.config_file=./torchtitan/experiments/wan/train_configs/wan_1xwm.toml
 ```
 
+Run training with pre-encoded latents:
+```bash
+# First, encode latents (one-time):
+python -m torchtitan.experiments.wan.encode_latents \
+    --dataset_path ./dataset/world_model_raw_data/train_v2.0_raw \
+    --output_dir ./dataset/world_model_raw_data/train_v2.0_latents \
+    --vae_path assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth \
+    --num_samples 100000
+
+# Then train with pre-encoded latents:
+torchrun --nproc_per_node=4 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3 --log-dir=./logs/debug -m torchtitan.experiments.wan.train --job.config_file=./torchtitan/experiments/wan/train_configs/wan_1xwm_latents.toml
+```
+
 
 1. Select dataset -> In our case this is the 1x World Model dataset (+ other NVIDIA stuff)
 check what they did for FLUX

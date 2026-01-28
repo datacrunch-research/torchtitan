@@ -20,12 +20,6 @@ from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
-# # Import LoRA functions (only when needed)
-# try:
-#     from torchtitan.experiments.wan.model.lora import apply_lora_to_linear, freeze_base_weights
-#     LORA_AVAILABLE = True
-# except ImportError:
-#     LORA_AVAILABLE = False
 
 
 def parallelize_wan(
@@ -173,8 +167,10 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
         compiled_block = torch.compile(
             block,
             backend=compile_config.backend,
-            fullgraph=True,  # Require full graph for better optimization
-            dynamic=True,  # Handle varying input sizes without recompilation
+            # fullgraph=True,
+            # dynamic=True,
+            mode="max-autotune-no-cudagraphs",  
+            # Autotune without CUDA graphs (compatible with activation checkpointing)
         )
         model.blocks.register_module(layer_id, compiled_block)
         compiled_blocks += 1
@@ -216,11 +212,6 @@ def parallelize_encoders(
             fully_shard(block, **fsdp_config)
 
         fully_shard(t5_model.hf_module, **fsdp_config)
-
-        # TODO: wrapping with FSDP the wan_video_vae introduces problem with how the cache is handled. Are there better way to
-        # fully_shard(wan_video_vae.model.encoder, **fsdp_config)
-        # fully_shard(wan_video_vae.model.decoder, **fsdp_config)
-        # fully_shard(wan_video_vae.model, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the T5 encoder model")

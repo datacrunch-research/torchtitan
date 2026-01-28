@@ -19,7 +19,10 @@ from torchtitan.components.loss import build_mse_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 
-from torchtitan.experiments.wan.wan_datasets import build_wan_dataloader
+from torchtitan.experiments.wan.wan_datasets import (
+    build_wan_dataloader,
+    build_wan_latent_dataloader,
+)
 from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_wan
 from .model.args import WanModelArgs
@@ -64,6 +67,32 @@ wan_configs = {
 }
 
 
+def _build_wan_dataloader_dispatch(dp_world_size, dp_rank, job_config, tokenizer, infinite=True):
+    """
+    Dispatch to the appropriate dataloader based on config.
+
+    If latents_path is set, use pre-encoded latents from disk.
+    Otherwise, use raw videos with on-the-fly VAE encoding.
+    """
+    latents_path = getattr(job_config.training, "latents_path", "")
+    if latents_path:
+        return build_wan_latent_dataloader(
+            dp_world_size=dp_world_size,
+            dp_rank=dp_rank,
+            job_config=job_config,
+            tokenizer=tokenizer,
+            infinite=infinite,
+        )
+    else:
+        return build_wan_dataloader(
+            dp_world_size=dp_world_size,
+            dp_rank=dp_rank,
+            job_config=job_config,
+            tokenizer=tokenizer,
+            infinite=infinite,
+        )
+
+
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=WanModel,
@@ -72,7 +101,7 @@ def get_train_spec() -> TrainSpec:
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_wan_dataloader,
+        build_dataloader_fn=_build_wan_dataloader_dispatch,
         build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
         build_validator_fn=build_wan_validator,

@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import pickle
+from pathlib import Path
+# import icecream
 from typing import Any, Callable, Optional
 
 import torch
 
-# from datasets import Dataset, load_dataset
-# from datasets.distributed import split_dataset_by_node
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -206,6 +206,162 @@ def _validate_dataset(
     return path, config.loader, config.sample_processor
 
 
+class LatentDatasetWrapper(IterableDataset, Stateful):
+    """
+    Dataset that loads pre-encoded VAE latents from disk.
+
+    This is much faster than encoding videos on-the-fly since it avoids
+    VAE forward passes entirely.
+
+    Each latent file: latent_XXXXXXXX.pt containing tensor (C, T, H, W) = (48, 20, 32, 32)
+    Robot states are loaded from the raw dataset for conditioning.
+
+    Args:
+        latents_dir: Path to directory containing latent_XXXXXXXX.pt files
+        raw_dataset_path: Path to raw dataset (for robot_states)
+        t5_tokenizer: T5 tokenizer for text encoding
+        job_config: Job configuration
+        dp_rank: Data parallel rank
+        dp_world_size: Data parallel world size
+        infinite: Whether to loop infinitely
+    """
+
+    def __init__(
+        self,
+        latents_dir: str,
+        raw_dataset_path: str,
+        t5_tokenizer: BaseTokenizer,
+        job_config: JobConfig,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        infinite: bool = True,
+    ) -> None:
+        logger.info("=" * 60)
+        logger.info("Initializing LatentDatasetWrapper")
+        logger.info("=" * 60)
+        logger.info(f"  Latents directory: {latents_dir}")
+        logger.info(f"  Raw dataset path: {raw_dataset_path}")
+        logger.info(f"  DP rank: {dp_rank}, DP world size: {dp_world_size}")
+
+        self.latents_dir = Path(latents_dir)
+        self.job_config = job_config
+        self.infinite = infinite
+
+        # Discover available latent files and extract indices
+        logger.info("  Scanning for latent files...")
+        latent_files = sorted(self.latents_dir.glob("latent_*.pt"))
+        all_indices = []
+        for f in latent_files:
+            # Extract index from filename like "latent_00000123.pt"
+            idx_str = f.stem.split("_")[1]
+            all_indices.append(int(idx_str))
+
+        self._dataset_len = len(all_indices)
+        logger.info(f"  Found {self._dataset_len} latent files")
+
+        # Split indices across data parallel ranks
+        indices_per_rank = self._dataset_len // dp_world_size
+        start_idx = dp_rank * indices_per_rank
+        end_idx = start_idx + indices_per_rank if dp_rank < dp_world_size - 1 else self._dataset_len
+
+        self._all_indices = all_indices
+        self._start_idx = start_idx
+        self._end_idx = end_idx
+        self._my_indices = all_indices[start_idx:end_idx]
+        logger.info(f"  DP sharding: rank {dp_rank} gets indices [{start_idx}:{end_idx}] ({len(self._my_indices)} samples)")
+
+        # Load raw dataset for robot_states only
+        # We need the same clip extraction logic to get aligned robot states
+        logger.info("  Loading raw dataset for robot_states...")
+        downsampled = getattr(job_config.training, "downsampled", 4)
+        clip_length = getattr(job_config.training, "clip_length", 77)
+        window_size = getattr(job_config.training, "window_size", 8)
+        robot_temporal_mode = getattr(job_config.training, "robot_temporal_mode", "downsample")
+
+        self._raw_dataset = BaseRawVideoDataset(
+            data_dir=raw_dataset_path,
+            downsampled=downsampled,
+            clip_length=clip_length,
+            window_size=window_size,
+            robot_temporal_mode=robot_temporal_mode,
+        )
+        logger.info(f"  Raw dataset loaded: {len(self._raw_dataset)} samples")
+
+        # Tokenizer for T5 (precompute empty string tokens)
+        self._t5_tokenizer = t5_tokenizer
+        self._t5_empty_token = t5_tokenizer.encode("")
+
+        # Checkpoint state
+        self._sample_idx = 0  # Index within _my_indices
+
+        logger.info("  LatentDatasetWrapper initialization complete")
+        logger.info("=" * 60)
+
+    def _get_data_iter(self):
+        """Get iterator over indices for this rank."""
+        if self._sample_idx >= len(self._my_indices):
+            return iter([])
+        return iter(range(self._sample_idx, len(self._my_indices)))
+
+    def __iter__(self):
+        """Iterate over the dataset."""
+        while True:
+            indices_iter = self._get_data_iter()
+
+            for local_idx in indices_iter:
+                global_idx = self._my_indices[local_idx]
+
+                # Load pre-encoded latent from disk
+                latent_path = self.latents_dir / f"latent_{global_idx:08d}.pt"
+                latent = torch.load(latent_path, weights_only=True)
+
+                # Load robot_states from raw dataset
+                # The raw dataset returns (video_frames, robot_states)
+                _, robot_states = self._raw_dataset[global_idx]
+
+                # Build sample dict (similar to RawVideoDatasetWrapper)
+                sample_dict = {
+                    "latents": latent,  # Shape: (C, T, H, W) = (48, 20, 32, 32)
+                    "robot_states": robot_states,
+                    "t5_tokens": self._t5_empty_token,
+                    "sample_idx": global_idx,
+                }
+
+                self._sample_idx = local_idx + 1
+
+                # Yield sample_dict and latent (latent serves as "labels" placeholder)
+                # Note: For latent dataset, we don't have video_frames, so we pass latent
+                yield sample_dict, latent
+
+            if not self.infinite:
+                logger.warning(
+                    "Latent dataset has run out of data. "
+                    "This might cause NCCL timeout if data parallelism is enabled."
+                )
+                break
+            else:
+                # Reset for next iteration
+                self._sample_idx = 0
+                logger.warning("Latent dataset is being re-looped.")
+                continue
+
+    def load_state_dict(self, state_dict):
+        """Load checkpoint state."""
+        self._sample_idx = state_dict.get("sample_idx", 0)
+        # Ensure sample_idx is within valid range
+        if self._sample_idx < 0:
+            self._sample_idx = 0
+        if self._sample_idx >= len(self._my_indices):
+            self._sample_idx = len(self._my_indices) - 1
+
+    def state_dict(self):
+        """Save checkpoint state."""
+        return {"sample_idx": self._sample_idx}
+
+    def __len__(self):
+        return self._dataset_len
+
+
 class RawVideoDatasetWrapper(IterableDataset, Stateful):
     """
     Wrapper for RawVideoDataset to make it compatible with IterableDataset pattern.
@@ -261,6 +417,8 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
         # Create the underlying RawVideoDataset
         # The loader for 1x-wmds accepts additional parameters
         if dataset_name == "1xwm":
+            # ic(downsampled)
+            # ic(window_size)
             raw_dataset = dataset_loader(
                 path,
                 downsampled=downsampled,
@@ -330,6 +488,9 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
                 video_frames = sample_dict["video_frames"]  # TODO: is this zero copy?
                 # robot_states = sample_dict.pop("robot_states")
 
+                # Add sample index for latent caching
+                sample_dict["sample_idx"] = idx
+
                 yield sample_dict, video_frames
 
             if not self.infinite:
@@ -357,6 +518,9 @@ class RawVideoDatasetWrapper(IterableDataset, Stateful):
     def state_dict(self):
         """Save checkpoint state."""
         return {"sample_idx": self._sample_idx}
+    
+    def __len__(self):
+        return len(self._raw_dataset)
 
 
 def build_wan_dataloader(
@@ -418,6 +582,203 @@ def build_wan_dataloader(
     )
 
 
+def build_wan_latent_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    job_config: JobConfig,
+    tokenizer: WanTokenizer | None,
+    infinite: bool = True,
+) -> ParallelAwareDataloader:
+    """
+    Build a data loader that loads pre-encoded latents from disk.
+
+    Requires:
+    - job_config.training.latents_path: Path to latent files (latent_XXXXXXXX.pt)
+    - job_config.training.dataset_path: Path to raw dataset (for robot_states)
+    """
+    latents_path = job_config.training.latents_path
+    raw_dataset_path = job_config.training.dataset_path
+    logger.info(
+        f"Building LATENT dataloader: latents={latents_path}, raw={raw_dataset_path}"
+    )
+    batch_size = job_config.training.local_batch_size
+    num_workers = job_config.training.num_workers
+    persistent_workers = job_config.training.persistent_workers
+    pin_memory = job_config.training.pin_memory
+    prefetch_factor = job_config.training.prefetch_factor
+
+    if num_workers == 0 and prefetch_factor != 1.0:
+        prefetch_factor = None
+
+    t5_tokenizer = build_wan_tokenizer(job_config)
+
+    ds = LatentDatasetWrapper(
+        latents_dir=latents_path,
+        raw_dataset_path=raw_dataset_path,
+        t5_tokenizer=t5_tokenizer,
+        job_config=job_config,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=infinite,
+    )
+
+    return ParallelAwareDataloader(
+        dataset=ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+    )
+
+
+class ValidationLatentDatasetWrapper(IterableDataset, Stateful):
+    """
+    Dataset for validation that loads BOTH pre-encoded latents AND video frames.
+
+    Unlike training (which only needs latents), validation needs both:
+    - Pre-encoded latents: Skip VAE encoding during loss computation
+    - Original video frames: Required for PSNR computation against generated videos
+
+    Args:
+        latents_dir: Path to directory containing latent_XXXXXXXX.pt files
+        raw_dataset_path: Path to raw dataset (for video_frames and robot_states)
+        t5_tokenizer: T5 tokenizer for text encoding
+        job_config: Job configuration
+        dp_rank: Data parallel rank
+        dp_world_size: Data parallel world size
+        infinite: Whether to loop infinitely
+    """
+
+    def __init__(
+        self,
+        latents_dir: str,
+        raw_dataset_path: str,
+        t5_tokenizer: BaseTokenizer,
+        job_config: JobConfig,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        infinite: bool = False,
+    ) -> None:
+        logger.info("=" * 60)
+        logger.info("Initializing ValidationLatentDatasetWrapper")
+        logger.info("=" * 60)
+        logger.info(f"  Latents directory: {latents_dir}")
+        logger.info(f"  Raw dataset path: {raw_dataset_path}")
+        logger.info(f"  DP rank: {dp_rank}, DP world size: {dp_world_size}")
+
+        self.latents_dir = Path(latents_dir)
+        self.job_config = job_config
+        self.infinite = infinite
+
+        # Discover available latent files and extract indices
+        logger.info("  Scanning for validation latent files...")
+        latent_files = sorted(self.latents_dir.glob("latent_*.pt"))
+        all_indices = []
+        for f in latent_files:
+            idx_str = f.stem.split("_")[1]
+            all_indices.append(int(idx_str))
+
+        self._dataset_len = len(all_indices)
+        logger.info(f"  Found {self._dataset_len} validation latent files")
+
+        # Split indices across data parallel ranks
+        indices_per_rank = self._dataset_len // dp_world_size
+        start_idx = dp_rank * indices_per_rank
+        end_idx = start_idx + indices_per_rank if dp_rank < dp_world_size - 1 else self._dataset_len
+
+        self._all_indices = all_indices
+        self._start_idx = start_idx
+        self._end_idx = end_idx
+        self._my_indices = all_indices[start_idx:end_idx]
+        logger.info(f"  DP sharding: rank {dp_rank} gets indices [{start_idx}:{end_idx}] ({len(self._my_indices)} samples)")
+
+        # Load raw dataset for video_frames and robot_states
+        logger.info("  Loading raw dataset for video_frames and robot_states...")
+        downsampled = getattr(job_config.training, "downsampled", 4)
+        clip_length = getattr(job_config.training, "clip_length", 77)
+        window_size = getattr(job_config.training, "window_size", 8)
+        robot_temporal_mode = getattr(job_config.training, "robot_temporal_mode", "downsample")
+
+        self._raw_dataset = BaseRawVideoDataset(
+            data_dir=raw_dataset_path,
+            downsampled=downsampled,
+            clip_length=clip_length,
+            window_size=window_size,
+            robot_temporal_mode=robot_temporal_mode,
+        )
+        logger.info(f"  Raw dataset loaded: {len(self._raw_dataset)} samples")
+
+        # Tokenizer for T5 (precompute empty string tokens)
+        self._t5_tokenizer = t5_tokenizer
+        self._t5_empty_token = t5_tokenizer.encode("")
+
+        # Checkpoint state
+        self._sample_idx = 0
+
+        logger.info("  ValidationLatentDatasetWrapper initialization complete")
+        logger.info("=" * 60)
+
+    def _get_data_iter(self):
+        if self._sample_idx >= len(self._my_indices):
+            return iter([])
+        return iter(range(self._sample_idx, len(self._my_indices)))
+
+    def __iter__(self):
+        while True:
+            indices_iter = self._get_data_iter()
+
+            for local_idx in indices_iter:
+                global_idx = self._my_indices[local_idx]
+
+                # Load pre-encoded latent from disk
+                latent_path = self.latents_dir / f"latent_{global_idx:08d}.pt"
+                latent = torch.load(latent_path, weights_only=True)
+
+                # Load video_frames and robot_states from raw dataset
+                video_frames, robot_states = self._raw_dataset[global_idx]
+
+                # Build sample dict with BOTH latents and video_frames
+                sample_dict = {
+                    "latents": latent,  # Shape: (C, T, H, W) = (48, 20, 32, 32)
+                    "video_frames": video_frames,  # Shape: (T, H, W, C) for PSNR
+                    "robot_states": robot_states,
+                    "t5_tokens": self._t5_empty_token,
+                    "sample_idx": global_idx,
+                }
+
+                self._sample_idx = local_idx + 1
+
+                # Yield sample_dict and video_frames as labels (for compatibility)
+                yield sample_dict, video_frames
+
+            if not self.infinite:
+                logger.warning(
+                    "Validation latent dataset exhausted. "
+                    "This might cause NCCL timeout if data parallelism is enabled."
+                )
+                break
+            else:
+                self._sample_idx = 0
+                logger.warning("Validation latent dataset is being re-looped.")
+                continue
+
+    def load_state_dict(self, state_dict):
+        self._sample_idx = state_dict.get("sample_idx", 0)
+        if self._sample_idx < 0:
+            self._sample_idx = 0
+        if self._sample_idx >= len(self._my_indices):
+            self._sample_idx = len(self._my_indices) - 1
+
+    def state_dict(self):
+        return {"sample_idx": self._sample_idx}
+
+    def __len__(self):
+        return self._dataset_len
+
+
 def build_wan_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
@@ -430,13 +791,14 @@ def build_wan_validation_dataloader(
     """
     Build a data loader for WAN video validation datasets.
 
-    Currently only supports 1xwm dataset via RawVideoDatasetWrapper.
+    If validation.latents_path is set, loads pre-encoded latents from disk
+    (along with video frames for PSNR computation).
+    Otherwise, loads raw videos for on-the-fly VAE encoding.
     """
     dataset_name = job_config.validation.dataset.lower()
     dataset_path = job_config.validation.dataset_path
-    logger.info(
-        f"Building VALIDATION dataloader: dataset={dataset_name}, path={dataset_path}"
-    )
+    latents_path = getattr(job_config.validation, "latents_path", "")
+
     batch_size = job_config.validation.local_batch_size
     # Use training dataloader settings for validation as well
     num_workers = job_config.training.num_workers
@@ -453,15 +815,33 @@ def build_wan_validation_dataloader(
             f"Unsupported validation dataset: {dataset_name}. Only '1xwm' is currently supported."
         )
 
-    ds = RawVideoDatasetWrapper(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        t5_tokenizer=t5_tokenizer,
-        job_config=job_config,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+    # Use latent dataloader if latents_path is provided
+    if latents_path:
+        logger.info(
+            f"Building VALIDATION dataloader with PRE-ENCODED LATENTS: latents={latents_path}, raw={dataset_path}"
+        )
+        ds = ValidationLatentDatasetWrapper(
+            latents_dir=latents_path,
+            raw_dataset_path=dataset_path,
+            t5_tokenizer=t5_tokenizer,
+            job_config=job_config,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+        )
+    else:
+        logger.info(
+            f"Building VALIDATION dataloader with RAW VIDEOS: dataset={dataset_name}, path={dataset_path}"
+        )
+        ds = RawVideoDatasetWrapper(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            t5_tokenizer=t5_tokenizer,
+            job_config=job_config,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+        )
 
     return ParallelAwareDataloader(
         dataset=ds,

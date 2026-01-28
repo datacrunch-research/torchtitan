@@ -62,10 +62,6 @@ data_parallel_shard_degree = -1
 mode = "full"
 
 [compile]
-# NOTE: Using "aot_eager" backend instead of "inductor" due to Triton compatibility issues with GB300
-# GB300 has compute capability 10.3 (SM 103), but Triton generates sm_103a which ptxas doesn't recognize
-# The "aot_eager" backend avoids Triton and should work on GB300, though performance may be lower than inductor
-# Once Triton/PyTorch adds proper GB300 (sm_103) support, switch back to backend = "inductor" for best performance
 enable = false
 components = ["model", "loss"]  # Compile both model and loss function
 backend = "inductor"  # Use aot_eager backend (no Triton) to avoid sm_103a compilation errors
@@ -83,7 +79,7 @@ enable = true
 dataset = "1xwm"  # Can use same dataset for validation
 dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"  # Validation dataset path
 local_batch_size = 1
-steps = 6   # Recommended value with the current settings and world_size=8
+steps = 1   # Recommended value with the current settings and world_size=8
 freq = 1
 enable_classifier_free_guidance = false
 num_cond_frames = 5

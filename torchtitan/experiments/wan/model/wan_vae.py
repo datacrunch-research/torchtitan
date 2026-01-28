@@ -1213,6 +1213,8 @@ class VideoVAE_(nn.Module):
 
         for i in range(iter_):
             self._enc_conv_idx = [0]
+            # # Mark step boundary for CUDA graphs compatibility
+            # torch.compiler.cudagraph_mark_step_begin()
             if i == 0:
                 out = self.encoder(
                     x[:, :, :1, :, :],
@@ -1693,7 +1695,7 @@ class VideoVAE38_(VideoVAE_):
         if attn_scales is None:
             attn_scales = []
         if temporal_downsample is None:
-            [False, True, True]
+            temporal_downsample = [False, True, True]
         self.dim = dim
         self.z_dim = z_dim
         self.dim_mult = dim_mult

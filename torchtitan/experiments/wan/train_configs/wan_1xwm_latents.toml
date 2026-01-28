@@ -1,0 +1,108 @@
+# Config for training with PRE-ENCODED LATENTS from disk
+#
+# Requirements:
+#   1. Pre-encode latents first using encode_latents.py
+#   2. Set latents_path to the directory containing latent_XXXXXXXX.pt files
+#
+# Run with:
+#   torchrun --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 \
+#       --local-ranks-filter=0 --role=rank --tee=3 --log-dir=./logs/debug \
+#       -m torchtitan.experiments.wan.train \
+#       --job.config_file=./torchtitan/experiments/wan/train_configs/wan_1xwm_latents.toml
+
+[job]
+dump_folder = "./outputs"
+description = "Wan video model with pre-encoded latents"
+custom_config_module = "torchtitan.experiments.wan.job_config"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = true
+
+[model]
+name = "wan"
+flavor = "wan-video"
+converters = ["quantize.linear.float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 1e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 1000
+decay_ratio = 0.9
+
+[training]
+local_batch_size = 64
+max_norm = 1.0
+steps = 10_000
+dataset = "1xwm"
+dataset_path = "./dataset/world_model_raw_data/train_v2.0_raw"  # Still needed for robot_states
+downsampled = 4
+clip_length = 77
+window_size = 4
+robot_temporal_mode = "downsample"
+num_workers = 8
+persistent_workers = true
+pin_memory = true
+prefetch_factor = 2
+dtype = "bfloat16"
+# PRE-ENCODED LATENTS CONFIG
+latents_path = "./dataset/world_model_raw_data/train_v2.0_latents"
+cache_latents = false  # Disabled when using latents from disk
+cache_latents_max_samples = 0
+overfit_single_sample = true
+
+[encoder]
+t5_encoder = "google/umt5-xxl"
+max_t5_encoding_len = 512
+wan_vae_path = "assets/hf/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
+components = []
+backend = "inductor"
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
+
+[checkpoint]
+enable = true
+folder = "checkpoint"
+interval = 1000
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "async"
+
+[validation]
+enable = true
+dataset = "1xwm"
+dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"
+local_batch_size = 1
+steps = 1
+freq = 100
+enable_classifier_free_guidance = false
+classifier_free_guidance_scale = 1.0
+denoising_steps = 50
+save_img_count = 50
+save_img_folder = "videos"
+all_timesteps = false

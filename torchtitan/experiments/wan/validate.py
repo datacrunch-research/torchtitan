@@ -106,6 +106,18 @@ class WanValidator(Validator):
         self.t5_encoder = t5_encoder
         self.precomputed_t5_embedding = precomputed_t5_embedding
 
+        # Overfit mode: use same batch as training for validation
+        self._overfit_batch: tuple[dict[str, Tensor], Tensor] | None = None
+        self._overfit_mode = getattr(self.job_config.training, "overfit_single_sample", True)
+
+    def set_overfit_batch(self, input_dict: dict[str, Tensor], labels: Tensor) -> None:
+        """Set the cached batch for overfit mode validation."""
+        self._overfit_batch = (
+            {k: v.clone() if isinstance(v, Tensor) else v for k, v in input_dict.items()},
+            labels.clone(),
+        )
+        logger.info("Validator: cached overfit batch for validation")
+
     @torch.no_grad()
     def validate(
         self,
@@ -135,15 +147,36 @@ class WanValidator(Validator):
         accumulated_losses = []
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
+        # Overfit mode: use cached training batch instead of validation dataloader
+        if self._overfit_mode and self._overfit_batch is not None:
+            logger.info("Validation using OVERFIT batch (same as training)")
+            data_source = [self._overfit_batch]  # Single-item iterator
+        else:
+            logger.info(f"len(validation_dataloader): {len(self.validation_dataloader)}")
+            data_source = self.validation_dataloader
+
+        for input_dict, labels in data_source:
             if (
                 self.job_config.validation.steps != -1
                 and num_steps >= self.job_config.validation.steps
             ):
                 break
 
-            # Store original video frames for PSNR computation
-            original_video_frames = input_dict["video_frames"].clone()
+            # Overfit mode: clone tensors to avoid mutation
+            if self._overfit_mode and self._overfit_batch is not None:
+                input_dict = {k: v.clone() if isinstance(v, Tensor) else v for k, v in input_dict.items()}
+                labels = labels.clone()
+
+                # When overfit_single_sample=True, use only first element (bsz=1) for validation
+                if self.job_config.training.overfit_single_sample:
+                    input_dict = {k: v[:1] if isinstance(v, Tensor) else v for k, v in input_dict.items()}
+                    labels = labels[:1]
+
+            # Check if we have video frames (not available when using pre-encoded latents)
+            has_video_frames = "video_frames" in input_dict
+
+            # Store original video frames for PSNR computation (if available)
+            original_video_frames = input_dict["video_frames"].clone() if has_video_frames else None
 
             # Compute MSE loss similar to training
             # Preprocess data: generate t5 embeddings, encode video with VAE
@@ -155,9 +188,9 @@ class WanValidator(Validator):
                 batch=input_dict,
                 precomputed_t5_embedding=self.precomputed_t5_embedding,
             )
-
             t5_encodings = processed_input["t5_encodings"]
             latents = processed_input["latents"]  # Ground truth latents
+            logger.info(f"{latents.shape}")
 
             bsz = latents.shape[0]
 
@@ -228,78 +261,156 @@ class WanValidator(Validator):
 
             accumulated_losses.append(batch_loss.detach())
 
-            # Set num_cond_frames for generation
-            input_dict["num_cond_frames"] = num_cond_frames
+            # Video generation and PSNR computation require video_frames
+            # Skip when using pre-encoded latents (overfit mode with latents_path)
+            if has_video_frames:
+                # Set num_cond_frames for generation
+                input_dict["num_cond_frames"] = num_cond_frames
 
-            # Generate video using the diffusion model
-            generated_video = generate_video(
-                device=self.device,
-                dtype=self._dtype,
-                job_config=self.job_config,
-                model=model,
-                input_dict=input_dict,
-                wan_video_vae=self.wan_video_vae,
-                t5_tokenizer=self.t5_tokenizer,
-                t5_encoder=self.t5_encoder,
-                precomputed_t5_embedding=self.precomputed_t5_embedding,
-            )
-
-            # Save video periodically
-            output_dir = os.path.join(
-                self.job_config.job.dump_folder,
-                self.job_config.validation.save_img_folder,
-            )
-            save_video(
-                name=f"video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
-                output_dir=output_dir,
-                video=generated_video,
-                add_sampling_metadata=True,
-            )
-
-            # Compute PSNR for generated video vs ground truth
-            # Prepare ground truth: (B, T, H, W, C) uint8 [0,255] -> (B, C, T, H, W) float [-1,1]
-            gt_video = original_video_frames.float()
-            gt_video = (gt_video / 127.5) - 1.0
-            gt_video = gt_video.to(device=self.device, dtype=self._dtype)
-            gt_video = gt_video.permute(
-                0, 4, 1, 2, 3
-            )  # (B, T, H, W, C) -> (B, C, T, H, W)
-
-            # Save ground truth/target video for comparison
-            save_video(
-                name=f"target_video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
-                output_dir=output_dir,
-                video=gt_video,
-                add_sampling_metadata=False,
-            )
-
-            # Clamp generated video
-            gen_video = generated_video.clamp(-1.0, 1.0)
-
-            # Convert to CPU float32 for PSNR
-            gt_cpu = gt_video.cpu().float()
-            gen_cpu = gen_video.cpu().float()
-
-            B, C, T, H, W = gt_cpu.shape
-
-            # Compute PSNR for non-conditioning frames only
-            batch_psnr_values = []
-            for t in range(num_cond_frames, T):
-                gt_frame = gt_cpu[:, :, t, :, :]
-                gen_frame = gen_cpu[:, :, t, :, :]
-                psnr_frame = peak_signal_noise_ratio(
-                    gen_frame, gt_frame, data_range=2.0, reduction="none", dim=(1, 2, 3)
+                # Generate video using the diffusion model
+                generated_video = generate_video(
+                    device=self.device,
+                    dtype=self._dtype,
+                    job_config=self.job_config,
+                    model=model,
+                    input_dict=input_dict,
+                    wan_video_vae=self.wan_video_vae,
+                    t5_tokenizer=self.t5_tokenizer,
+                    t5_encoder=self.t5_encoder,
+                    precomputed_t5_embedding=self.precomputed_t5_embedding,
                 )
-                if psnr_frame.dim() == 0:
-                    psnr_frame = psnr_frame.unsqueeze(0)
-                batch_psnr_values.append(psnr_frame)
 
-            if batch_psnr_values:
-                batch_psnr = torch.stack(batch_psnr_values).mean()
-                all_psnr_values.append(batch_psnr)
+                # Save video periodically
+                output_dir = os.path.join(
+                    self.job_config.job.dump_folder,
+                    self.job_config.validation.save_img_folder,
+                )
+                save_video(
+                    name=f"video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
+                    output_dir=output_dir,
+                    video=generated_video,
+                    add_sampling_metadata=True,
+                )
+
+                # Compute PSNR for generated video vs ground truth
+                # Prepare ground truth: (B, T, H, W, C) uint8 [0,255] -> (B, C, T, H, W) float [-1,1]
+                gt_video = original_video_frames.float()
+                gt_video = (gt_video / 127.5) - 1.0
+                gt_video = gt_video.to(device=self.device, dtype=self._dtype)
+                gt_video = gt_video.permute(
+                    0, 4, 1, 2, 3
+                )  # (B, T, H, W, C) -> (B, C, T, H, W)
+
+                # Save ground truth/target video for comparison
+                save_video(
+                    name=f"target_video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
+                    output_dir=output_dir,
+                    video=gt_video,
+                    add_sampling_metadata=False,
+                )
+
+                # Clamp generated video
+                gen_video = generated_video.clamp(-1.0, 1.0)
+
+                # Convert to CPU float32 for PSNR
+                gt_cpu = gt_video.cpu().float()
+                gen_cpu = gen_video.cpu().float()
+
+                B, C, T, H, W = gt_cpu.shape
+
+                # Compute PSNR for non-conditioning frames only
+                batch_psnr_values = []
+                for t in range(num_cond_frames, T):
+                    gt_frame = gt_cpu[:, :, t, :, :]
+                    gen_frame = gen_cpu[:, :, t, :, :]
+                    psnr_frame = peak_signal_noise_ratio(
+                        gen_frame, gt_frame, data_range=2.0, reduction="none", dim=(1, 2, 3)
+                    )
+                    if psnr_frame.dim() == 0:
+                        psnr_frame = psnr_frame.unsqueeze(0)
+                    batch_psnr_values.append(psnr_frame)
+
+                if batch_psnr_values:
+                    batch_psnr = torch.stack(batch_psnr_values).mean()
+                    all_psnr_values.append(batch_psnr)
+            else:
+                # No video_frames available (using pre-encoded latents)
+                # Decode ground truth latents to get pseudo-ground-truth video for PSNR
+                logger.info("Using decoded latents as ground truth for PSNR")
+
+                # Set num_cond_frames for generation
+                input_dict["num_cond_frames"] = num_cond_frames
+
+                # Generate video using the diffusion model
+                generated_video = generate_video(
+                    device=self.device,
+                    dtype=self._dtype,
+                    job_config=self.job_config,
+                    model=model,
+                    input_dict=input_dict,
+                    wan_video_vae=self.wan_video_vae,
+                    t5_tokenizer=self.t5_tokenizer,
+                    t5_encoder=self.t5_encoder,
+                    precomputed_t5_embedding=self.precomputed_t5_embedding,
+                )
+
+                # Save generated video
+                output_dir = os.path.join(
+                    self.job_config.job.dump_folder,
+                    self.job_config.validation.save_img_folder,
+                )
+                save_video(
+                    name=f"video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
+                    output_dir=output_dir,
+                    video=generated_video,
+                    add_sampling_metadata=True,
+                )
+
+                # Decode ground truth latents to video for PSNR comparison
+                # latents shape: (B, C, T, H, W)
+                gt_video = self.wan_video_vae.decode(
+                    hidden_states=latents,
+                    device=self.device,
+                    tiled=True,
+                )
+                gt_video = gt_video.clamp(-1.0, 1.0)
+
+                # Save decoded ground truth video for comparison
+                save_video(
+                    name=f"target_video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
+                    output_dir=output_dir,
+                    video=gt_video,
+                    add_sampling_metadata=False,
+                )
+
+                # Clamp generated video
+                gen_video = generated_video.clamp(-1.0, 1.0)
+
+                # Convert to CPU float32 for PSNR
+                gt_cpu = gt_video.cpu().float()
+                gen_cpu = gen_video.cpu().float()
+
+                B, C, T, H, W = gt_cpu.shape
+
+                # Compute PSNR for non-conditioning frames only
+                batch_psnr_values = []
+                for t in range(num_cond_frames, T):
+                    gt_frame = gt_cpu[:, :, t, :, :]
+                    gen_frame = gen_cpu[:, :, t, :, :]
+                    psnr_frame = peak_signal_noise_ratio(
+                        gen_frame, gt_frame, data_range=2.0, reduction="none", dim=(1, 2, 3)
+                    )
+                    if psnr_frame.dim() == 0:
+                        psnr_frame = psnr_frame.unsqueeze(0)
+                    batch_psnr_values.append(psnr_frame)
+
+                if batch_psnr_values:
+                    batch_psnr = torch.stack(batch_psnr_values).mean()
+                    all_psnr_values.append(batch_psnr)
 
             # Update token count for metrics
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            if self.metrics_processor is not None:
+                self.metrics_processor.ntokens_since_last_log += labels.numel()
 
             num_steps += 1
 

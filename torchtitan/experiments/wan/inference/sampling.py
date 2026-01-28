@@ -152,7 +152,16 @@ def generate_video(
 
     # bsz = video_latents.shape[0]
     z_dim = video_latents.shape[1]
-    num_frames = input_dict["video_frames"].shape[1]  # Original number of frames
+
+    # Get num_frames from video_frames if available, otherwise compute from latents
+    if "video_frames" in input_dict:
+        num_frames = input_dict["video_frames"].shape[1]  # Original number of frames
+    else:
+        # Compute num_frames from latent shape using VAE temporal upsampling
+        # VAE temporal downsampling: T_latent = (T - 1) // 4 + 1
+        # Reverse: T = (T_latent - 1) * 4 + 1
+        T_latent = video_latents.shape[2]
+        num_frames = (T_latent - 1) * 4 + 1
 
     # logger.info(f"Video latents shape: {video_latents.shape}")
     # logger.info(f"T5 encodings shape: {t5_encodings.shape}")
