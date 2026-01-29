@@ -18,7 +18,7 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import Color, device_module, device_type
+from torchtitan.tools.utils import Color, device_module, device_type, NoColor
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
@@ -42,11 +42,6 @@ class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
         # pyrefly: ignore [read-only]
         self.device = torch.device(device)  # device object
-        # from icecream import ic
-
-        # ic(self.device)
-        # ic(device_module)
-        # ic(device_module.get_device_name(self.device))
         self.device_name = device_module.get_device_name(self.device)
         self.device_index = device_module.current_device()
         self.device_capacity = device_module.get_device_properties(
@@ -200,7 +195,7 @@ class LoggerContainer(BaseLogger):
 
 
 def ensure_pp_loss_visible(
-    parallel_dims: ParallelDims, job_config: JobConfig, color: Color
+    parallel_dims: ParallelDims, job_config: JobConfig, color: Color | NoColor
 ) -> None:
     """
     Ensures that the loss is visible on the console for pipeline-parallel training.

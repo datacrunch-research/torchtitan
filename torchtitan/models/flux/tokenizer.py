@@ -11,6 +11,7 @@
 from typing import List
 
 import torch
+
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -131,7 +132,7 @@ class FluxTokenizer(BaseTokenizer):
         return tokens
 
     # pyrefly: ignore [bad-override]
-    def decode(self, t: List[int]) -> str:
+    def decode(self, t: list[int]) -> list[str] | str:
         """
         Decode function. This function will not be called.
         """

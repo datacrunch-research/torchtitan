@@ -167,18 +167,6 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -208,6 +196,7 @@ class Attention(nn.Module):
         )
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -269,36 +258,47 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        block_mask=attention_masks,
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq,
-                    xk,
-                    xv,
-                    self.head_dim,
+                    xq,  # (bs, n_heads, seqlen, head_dim)
+                    xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                    xv,  # (bs, n_kv_heads, seqlen, head_dim)
                     attention_masks,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 
@@ -419,7 +419,7 @@ class TransformerBlock(nn.Module):
         self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Transformer(nn.Module, ModelProtocol):
+class Transformer(ModelProtocol):
     """
     Transformer Module
 
@@ -439,7 +439,7 @@ class Transformer(nn.Module, ModelProtocol):
     """
 
     def __init__(self, model_args: TransformerModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -496,9 +496,6 @@ class Transformer(nn.Module, ModelProtocol):
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # TODO: explain in docs/composability.md why we removed the 2x
-            # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
             self.model_args.rope_scaling_args,
@@ -517,6 +514,7 @@ class Transformer(nn.Module, ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
@@ -544,13 +542,12 @@ class Transformer(nn.Module, ModelProtocol):
                         f"varlen attention is only supported with block_causal \
                         attention mask type, got {self.model_args.attn_mask_type}"
                     )
+                assert tokenizer.eos_id is not None
                 return create_varlen_metadata_for_document(
                     input_batch, tokenizer.eos_id
                 )
             case _:
-                raise NotImplementedError(
-                    "Only varlen and flex attn masks are supported"
-                )
+                raise TypeError("Only varlen and flex attn masks are supported")
 
     def forward(
         self,
@@ -574,15 +571,15 @@ class Transformer(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(
                 h, self.freqs_cis, attention_masks=attention_masks, positions=positions
             )
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.norm(h) if self.norm else h
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         output = self.output(h) if self.output else h
         return output

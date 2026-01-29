@@ -95,18 +95,6 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention (MLA) module.
@@ -117,6 +105,7 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.n_heads = model_args.n_heads
         self.n_kv_heads = model_args.n_kv_heads
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.n_rep = self.n_heads // self.n_kv_heads
 
@@ -182,17 +171,19 @@ class Attention(nn.Module):
 
         q, k = apply_rotary_emb(q, k, rope_cache)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(k, self.n_rep)
-        values = repeat_kv(v, self.n_rep)
-
-        xq = q.transpose(1, 2).contiguous()
-        xk = keys.transpose(1, 2).contiguous()
-        xv = values.transpose(1, 2).contiguous()
+        xq = q.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = k.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = v.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         assert isinstance(attention_masks, BlockMask), attention_masks
         output, lse = self.inner_attention(
-            xq, xk, xv, block_mask=attention_masks, scale=None, return_lse=True
+            xq,
+            xk,
+            xv,
+            block_mask=attention_masks,
+            scale=None,
+            return_lse=True,
+            enable_gqa=self.enable_gqa,
         )
 
         # Apply attention sink rescaling: rescale by σ(lse - w[h])
@@ -250,8 +241,10 @@ class TransformerBlock(nn.Module):
         """
         # Extract the appropriate mask for this layer
         if self.use_sliding_attention:
+            # pyrefly: ignore [missing-attribute]
             layer_mask = attention_masks.get("sliding_window_mask", None)
         else:
+            # pyrefly: ignore [missing-attribute]
             layer_mask = attention_masks.get("basic_mask", None)
         assert layer_mask is not None
 
@@ -266,13 +259,13 @@ class TransformerBlock(nn.Module):
         self.moe.init_weights(self.weight_init_std, buffer_device)
 
 
-class GptOssModel(nn.Module, ModelProtocol):
+class GptOssModel(ModelProtocol):
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
     """
 
     def __init__(self, model_args: GptOssModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
@@ -304,6 +297,7 @@ class GptOssModel(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
@@ -342,6 +336,7 @@ class GptOssModel(nn.Module, ModelProtocol):
                 basic_mask_mods.append(get_causal_mask_mod())
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 basic_mask_mods.append(
                     get_document_mask_mod(input_batch, tokenizer.eos_id)
                 )

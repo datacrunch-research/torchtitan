@@ -224,22 +224,16 @@ def create_context_parallel_ctx(
 
 class TrainContext(Protocol):
     @abstractmethod
-    def __call__(
-        self,
-        cp_context: contextlib.AbstractContextManager[None] | None = None,
-    ) -> contextlib.AbstractContextManager[None]:
+    def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
 def get_train_context(enable_loss_parallel: bool) -> TrainContext:
     @contextlib.contextmanager
-    def context(cp_context: contextlib.AbstractContextManager[None] | None = None):
+    def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if cp_context:
-                stack.enter_context(cp_context)
 
             yield
 
@@ -384,9 +378,7 @@ def set_pg_timeouts(
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
-    # pyrefly: ignore [missing-attribute]
     torch.distributed.barrier(device_ids=[device_module.current_device()])
-    # pyrefly: ignore [missing-attribute]
     device_module.synchronize()
 
     # None represents the 'default' PG, not part of the mesh
@@ -497,25 +489,32 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        # pyrefly: ignore [not-iterable]
+        # pyrefly: ignore[not-iterable]
         if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
         else:
             non_ep_params.append(p)
             non_ep_grads.append(p.grad)
+
+    # Either list can be empty depending on the parallelization strategy:
+    # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
+    # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
+    #   so non_ep_grads would be empty
+    # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
     ep_grads_total_norm = torch.nn.utils.get_total_norm(
         ep_grads, norm_type, error_if_nonfinite, foreach
     )
-    # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
-    # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
+    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    # pyrefly: ignore [missing-attribute]
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
-    ).full_tensor()
+    )
+    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
+    if isinstance(non_ep_grads_total_norm, DTensor):
+        non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)

@@ -26,6 +26,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
@@ -39,7 +40,10 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import (
+    apply_ddp,
+    disable_fsdp_gradient_division,
+)
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
@@ -133,17 +137,23 @@ def parallelize_llama(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
-        # tp_mesh might have been set above if tp_enabled, otherwise get it here
-        if tp_mesh is None:
-            tp_mesh = parallel_dims.get_mesh("tp")
         apply_moe_ep_tp(
             model,
-            tp_mesh=tp_mesh,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+        )
+
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            attn_type,
         )
 
     model_compile_enabled = (
@@ -200,9 +210,6 @@ def parallelize_llama(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
 
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
@@ -275,7 +282,8 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
+            # and desired input layout is still None as we don't convert freqs_cis to
+            # a DTensor for llama4.
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
@@ -304,7 +312,6 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -401,13 +408,6 @@ def apply_fsdp(
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
-            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
-            #       a different size than other parameters, the gradient division
-            #       factor should be consistent with data.
-            transformer_block.moe.experts.set_gradient_divide_factor(
-                gradient_divide_factor,
-            )
-
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -425,6 +425,9 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP
@@ -595,9 +598,6 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
-    # Workaround for https://github.com/pytorch/pytorch/issues/166926
-    # pyrefly: ignore [missing-attribute]
-    torch._C._dynamo.eval_frame._set_lru_cache(False)
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:
