@@ -234,8 +234,11 @@ class WanValidator(Validator):
                 target_noise_diff[:, :, :num_latent_cond, :, :] = 0.0
             target = pack_latents(target_noise_diff)
 
-            # Prepare context parallel context if enabled
-            optional_context_parallel_ctx = None
+            # TODO: Context Parallel is not currently used. This context is created but
+            # validation_context() doesn't accept it as an argument. To enable CP, follow the
+            # Flux pattern: use cp_shard() to shard tensors before validation_context() instead
+            # of passing a context manager. See torchtitan/models/flux/train.py for reference.
+            optional_context_parallel_ctx = None  # noqa: F841 - kept for future CP implementation
             if parallel_dims.cp_enabled:
                 # Pack latents for context parallel
                 latents_p = pack_latents(noisy_latents)
@@ -258,7 +261,7 @@ class WanValidator(Validator):
                 )
 
             # Forward pass through the model
-            with self.validation_context(optional_context_parallel_ctx):
+            with self.validation_context():
                 with self.maybe_enable_amp:
                     # Model forward: predict noise in latents
                     latent_noise_pred = model(
