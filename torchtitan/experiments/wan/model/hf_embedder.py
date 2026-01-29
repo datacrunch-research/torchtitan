@@ -6,8 +6,9 @@
 
 import os
 
-from torch import nn, Tensor
 import torch.distributed as dist
+
+from torch import nn, Tensor
 from transformers import T5EncoderModel
 
 
@@ -24,7 +25,6 @@ class WanEmbedder(nn.Module):
 
     def __init__(self, version: str, random_init=False, **hf_kwargs):
         super().__init__()
-
 
         if random_init:
             # Initialize T5 model with random weights for test purpose only

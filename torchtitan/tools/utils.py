@@ -8,7 +8,6 @@ import contextlib
 import gc
 import subprocess
 import time
-import types
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Generator, Optional
