@@ -329,7 +329,6 @@ def main():
     model.eval()
     logger.info(f"WanModel loaded and moved to {device} with dtype {dtype}")
 
-
     # Encode prompts with T5
     # IMPORTANT: Wan2.2 trims T5 output to actual sequence length, then pads with ZEROS
     # This is different from keeping the full T5 output with padding token embeddings

@@ -307,7 +307,6 @@ class WanTrainer(Trainer):
             else None
         )
 
-
         with self.train_context(optional_context_parallel_ctx):
             with self.maybe_enable_amp:
                 # Model forward: predict noise in latents

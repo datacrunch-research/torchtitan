@@ -15,22 +15,21 @@ cd path/to/torchtitan
 uv venv --python 3.12
 uv pip install -r requirements.txt
 uv pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
-cd torchtitan
-```
-
-Install the required dependencies:
-```bash
-pip install -r requirements-wan.txt
+uv pip install -r torchtitan/experiments/wan/requirements-wan.txt
 ```
 
 ## Download the Wan2.2 TI2V-5B weights
 Download the Wan2.2 TI2V-5B weights from HF:
 ```bash
 python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-TI2V-5B --all --hf_token <your_access_token>
+# or
+# hf auth login
+# python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-TI2V-5B --all
 ```
 
+<!-- TODO
 Download the datasets:
-
+-->
 
 ## Usage
 Run the following command to train the model:

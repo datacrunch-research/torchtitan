@@ -42,6 +42,11 @@ class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
         # pyrefly: ignore [read-only]
         self.device = torch.device(device)  # device object
+        from icecream import ic
+
+        ic(self.device)
+        ic(device_module)
+        ic(device_module.get_device_name(self.device))
         self.device_name = device_module.get_device_name(self.device)
         self.device_index = device_module.current_device()
         self.device_capacity = device_module.get_device_properties(
@@ -535,4 +540,3 @@ def build_metrics_processor(
         MetricsProcessor: A metrics processor.
     """
     return MetricsProcessor(job_config, parallel_dims, tag)
-    
