@@ -185,15 +185,24 @@ class WanTrainer(Trainer):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             # Compute transformer sequence length for MFU/TPS metrics
-            # labels.shape = (B, T, H, W, C) - Raw video frames (channels LAST)
-            # VAE downsampling: temporal (T-1)//4 + 1, spatial 16x (512->32)
             # Patchification: patch_size=[1, 2, 2]
             # seq_len = T_latent × (H_latent/2) × (W_latent/2)
             batch_size = labels.shape[0]
-            T_raw, H_raw, W_raw = labels.shape[1], labels.shape[2], labels.shape[3]
-            T_latent = (T_raw - 1) // 4 + 1  # VAE temporal downsampling
-            H_latent = H_raw // 16  # VAE 16x spatial downsampling
-            W_latent = W_raw // 16
+
+            # Check if labels are pre-loaded latents or raw video frames
+            # Pre-loaded latents: (B, C, T, H, W) with C=48 (latent channels)
+            # Raw video frames: (B, T, H, W, C) with C=3 (RGB)
+            if labels.shape[1] == 48:
+                # Pre-loaded latents: (B, C, T, H, W) - already downsampled
+                T_latent, H_latent, W_latent = labels.shape[2], labels.shape[3], labels.shape[4]
+            else:
+                # Raw video frames: (B, T, H, W, C)
+                # VAE downsampling: temporal (T-1)//4 + 1, spatial 16x (512->32)
+                T_raw, H_raw, W_raw = labels.shape[1], labels.shape[2], labels.shape[3]
+                T_latent = (T_raw - 1) // 4 + 1
+                H_latent = H_raw // 16
+                W_latent = W_raw // 16
+
             seq_len_per_video = T_latent * (H_latent // 2) * (W_latent // 2)
             ntokens_batch = batch_size * seq_len_per_video
             # logger.info(f"self.ntokens_seen: {self.ntokens_seen}")

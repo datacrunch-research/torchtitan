@@ -256,6 +256,9 @@ class Training:
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
 
+    loss_reduction: Literal["sum", "mean"] = "sum"
+    """Reduction method for loss function: 'sum' or 'mean'"""
+
     steps: int = 10000
     """How many train steps to run"""
 

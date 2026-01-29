@@ -36,16 +36,20 @@ def build_cross_entropy_loss(job_config: JobConfig, **kwargs):
     return loss_fn
 
 
-def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Common MSE loss function with sum reduction for Transformer models training."""
+def mse_loss(pred: torch.Tensor, labels: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+    """Common MSE loss function for diffusion models training."""
     return torch.nn.functional.mse_loss(
-        pred.float(), labels.float().detach(), reduction="sum"
+        pred.float(), labels.float().detach(), reduction=reduction
     )
 
 
 def build_mse_loss(job_config: JobConfig, **kwargs):
     del kwargs  # delete any unused arguments
-    loss_fn = mse_loss
+    reduction = getattr(job_config.training, "loss_reduction", "sum")
+
+    def loss_fn(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        return mse_loss(pred, labels, reduction=reduction)
+
     if job_config.compile.enable and "loss" in job_config.compile.components:
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
