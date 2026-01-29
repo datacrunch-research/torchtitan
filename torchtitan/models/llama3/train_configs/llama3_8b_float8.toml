@@ -31,8 +31,8 @@ eps = 1e-8
 warmup_steps = 200
 
 [training]
-local_batch_size = 6
-seq_len = 16384
+local_batch_size = 2
+seq_len = 8192
 max_norm = 1.0
 steps = 2000
 dataset = "c4"
