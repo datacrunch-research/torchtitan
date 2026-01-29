@@ -135,7 +135,12 @@ class WanTokenizer(BaseTokenizer):
 def build_wan_tokenizer(job_config: JobConfig) -> BaseTokenizer:
     """
     Build the tokenizer for Wan model (T5).
+
+    Uses a rank 0 download pattern to avoid all ranks hitting HuggingFace
+    simultaneously, which can cause timeouts and rate limiting.
     """
+    import torch.distributed as dist
+
     from torchtitan.tools.logging import logger
 
     t5_tokenizer_path = job_config.encoder.t5_encoder
@@ -153,10 +158,32 @@ def build_wan_tokenizer(job_config: JobConfig) -> BaseTokenizer:
     logger.info(
         f"Loading T5 tokenizer from: {t5_tokenizer_path} (max_length={max_t5_encoding_len})"
     )
-    t5_tokenizer = tokenizer_class(
-        t5_tokenizer_path,
-        max_length=max_t5_encoding_len,
-    )
+
+    # Use rank 0 download pattern to avoid all ranks hitting HuggingFace at once
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        if rank == 0:
+            # Rank 0 downloads first (will cache the files)
+            t5_tokenizer = tokenizer_class(
+                t5_tokenizer_path,
+                max_length=max_t5_encoding_len,
+            )
+        # Barrier: all ranks wait for rank 0 to finish downloading
+        dist.barrier()
+        if rank != 0:
+            # Other ranks load from cache
+            t5_tokenizer = tokenizer_class(
+                t5_tokenizer_path,
+                max_length=max_t5_encoding_len,
+                local_files_only=True,
+            )
+    else:
+        # Non-distributed case: just load normally
+        t5_tokenizer = tokenizer_class(
+            t5_tokenizer_path,
+            max_length=max_t5_encoding_len,
+        )
+
     logger.info("T5 tokenizer loaded successfully")
 
     return t5_tokenizer

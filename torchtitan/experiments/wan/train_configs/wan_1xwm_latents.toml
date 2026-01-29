@@ -44,7 +44,7 @@ warmup_steps = 1000
 decay_ratio = 0.9
 
 [training]
-local_batch_size = 64
+local_batch_size = 32
 max_norm = 1.0
 steps = 10_000
 dataset = "1xwm"
@@ -76,7 +76,7 @@ mode = "full"
 
 [compile]
 enable = true
-components = []
+components = ["model"]
 backend = "inductor"
 
 [quantize.linear.float8]

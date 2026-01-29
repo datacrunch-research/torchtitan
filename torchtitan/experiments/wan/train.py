@@ -203,16 +203,20 @@ class WanTrainer(Trainer):
                 time.perf_counter() - data_load_start
             )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
+            # Don't move tensors to GPU here - base train_step handles device placement
+            # after counting valid tokens on CPU
+            # for k, v in input_dict.items():
+            #     if isinstance(v, torch.Tensor):
+            #         input_dict[k] = v.to(device_type)
+            # labels = labels.to(device_type)
 
             yield input_dict, labels
 
     def forward_backward_step(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         # Preprocess data: generate t5 embeddings, encode video with VAE
@@ -283,6 +287,10 @@ class WanTrainer(Trainer):
                 target_noise_diff[:, :, :num_latent_cond, :, :] = 0.0
             target = pack_latents(target_noise_diff)
 
+        # TODO: Context Parallel is not currently used. This context is created but
+        # train_context() doesn't accept it as an argument. To enable CP, follow the
+        # Flux pattern: use cp_shard() to shard tensors before train_context() instead
+        # of passing a context manager. See torchtitan/models/flux/train.py for reference.
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=self.parallel_dims.world_mesh["cp"],
@@ -305,9 +313,9 @@ class WanTrainer(Trainer):
             )
             if self.parallel_dims.cp_enabled
             else None
-        )
+        )  # noqa: F841 - kept for future CP implementation
 
-        with self.train_context(optional_context_parallel_ctx):
+        with self.train_context():
             with self.maybe_enable_amp:
                 # Model forward: predict noise in latents
                 latent_noise_pred = model(

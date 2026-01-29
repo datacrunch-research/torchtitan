@@ -1,6 +1,7 @@
 transformers>=4.51.1
 diffusers
 torchao
+av
 einops
 sentencepiece
 pillow

@@ -7,6 +7,7 @@
 import os
 
 from torch import nn, Tensor
+import torch.distributed as dist
 from transformers import T5EncoderModel
 
 
@@ -16,10 +17,14 @@ class WanEmbedder(nn.Module):
 
     This class provides a unified interface for loading and using T5 encoder models
     with FSDP compatibility.
+
+    Uses a rank 0 download pattern to avoid all ranks hitting HuggingFace
+    simultaneously, which can cause timeouts and rate limiting.
     """
 
     def __init__(self, version: str, random_init=False, **hf_kwargs):
         super().__init__()
+
 
         if random_init:
             # Initialize T5 model with random weights for test purpose only
@@ -28,6 +33,21 @@ class WanEmbedder(nn.Module):
                     os.path.join(version, "config.json"), **hf_kwargs
                 )
             )
+        elif dist.is_initialized():
+            # Use rank 0 download pattern to avoid all ranks hitting HuggingFace at once
+            rank = dist.get_rank()
+            if rank == 0:
+                # Rank 0 downloads first (will cache the files)
+                self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
+                    version, **hf_kwargs
+                )
+            # Barrier: all ranks wait for rank 0 to finish downloading
+            dist.barrier()
+            if rank != 0:
+                # Other ranks load from cache
+                self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
+                    version, local_files_only=True, **hf_kwargs
+                )
         else:
             self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
                 version, **hf_kwargs
