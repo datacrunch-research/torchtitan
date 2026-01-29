@@ -18,6 +18,11 @@ RUN pip3 install --force-reinstall --pre torch torchvision --index-url https://d
 RUN pip3 install --no-cache-dir -r requirements.txt
 RUN pip3 install  -e .
 
+# Download HF assets (tokenizer)                                                                                                     
+RUN --mount=type=secret,id=hf_token \
+	HF_TOKEN=$(cat /run/secrets/hf_token) \
+	python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer 
+
 RUN cd .. && git clone https://github.com/NVIDIA/nccl.git &&  cd nccl/ext-profiler/inspector && make
 ENV NCCL_PROFILER_PLUGIN=/workspace/nccl/ext-profiler/inspector/libnccl-profiler-inspector.so
 ENV NCCL_INSPECTOR_ENABLE=1
