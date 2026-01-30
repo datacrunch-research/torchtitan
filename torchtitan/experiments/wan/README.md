@@ -13,23 +13,28 @@ Create an `uv` venv by running:
 ```bash
 cd path/to/torchtitan
 uv venv --python 3.12
-uv pip install -r requirements.txt
 uv pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
+uv pip install -r requirements.txt
+uv pip install -r requirements-dev.txt
 uv pip install -r torchtitan/experiments/wan/requirements-wan.txt
 ```
 
 ## Download the Wan2.2 TI2V-5B weights
 Download the Wan2.2 TI2V-5B weights from HF:
 ```bash
-python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-TI2V-5B --all --hf_token <your_access_token>
+python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-TI2V-5B  --all --hf_token <HF_TOKENn>
+python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-I2V-A14B --all --hf_token <HF_TOKEN>
 # or
 # hf auth login
 # python scripts/download_hf_assets.py --repo_id Wan-AI/Wan2.2-TI2V-5B --all
 ```
 
-<!-- TODO
-Download the datasets:
--->
+Download the 1X World Model dataset with:
+```bash
+# Remember to login to hf first
+hf auth login --token $HF_TOKEN
+hf download 1x-technologies/worldmodel_raw_data --repo-type dataset --local-dir $DATA_DIR/world_model_raw_data --token $HF_TOKEN 
+```
 
 ## Usage
 Run the following command to train the model:

@@ -28,42 +28,16 @@ torchrun --nproc_per_node=8 -m torchtitan.experiments.wan.encode_latents \
       --compile
 
 # Then train with pre-encoded latents:
-torchrun --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3  -m torchtitan.experiments.wan.train
+torchrun --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --local-ranks-filter=0 --role=rank --tee=3 --log-dir="./logs/$(date +%Y%m%d_%H%M%S)"  -m torchtitan.experiments.wan.train
  --job.config_file=./torchtitan/experiments/wan/train_configs/wan_1xwm_latents.toml
 ```
 
+--- 
+## Comprehensive TODO List for `add_validation` Branch
 
 1. Select dataset -> In our case this is the 1x World Model dataset (+ other NVIDIA stuff)
 check what they did for FLUX
     1. So far we are relying on `decord` but there is also this [PyNvVideoCodec](https://developer.nvidia.com/pynvvideocodec)
-
-
-
----
-`WanVAE2.2` or `WanVAE38`
-The "38" suffix refers to the **Wan 2.2 VAE** variant, which is different from the original Wan VAE:
-
-| Feature | `WanVideoVAE` (original) | `WanVideoVAE38` (Wan 2.2) |
-|---------|--------------------------|---------------------------|
-| Latent dim (`z_dim`) | 16 | **48** |
-| Encoder dim | 96 | **160** |
-| Decoder dim | 96 | **256** |
-| Uses patchify | No | **Yes** (2x2) |
-| Upsampling factor | 8 | **16** |
-| Classes used | `VideoVAE_`, `Encoder3d`, `Decoder3d` | `VideoVAE38_`, `Encoder3d_38`, `Decoder3d_38` |
-
-The "38" naming likely comes from an internal Alibaba version number. The key architectural difference is that the **Wan 2.2 VAE** (the 38 version) has:
-- Higher latent dimensionality (48 vs 16 channels)
-- Uses 2x2 spatial patchification before encoding
-- Uses `Resample38` which is designed to match the original Wan 2.2 temporal handling
-
-You're using `WanVideoVAE38` which is correct for the **Wan 2.2 TI2V-5B** model you're working with.
-
-The original code you pasted earlier (from Alibaba's Wan repo) corresponds to the `Wan2_2_VAE` class which uses `WanVAE_` - this is **equivalent** to your `VideoVAE38_` in torchtitan. The naming is just different.
-
----
-
-## Comprehensive TODO List for `add_validation` Branch
 
 ### 1. Validation Implementation (Priority: High)
 
@@ -129,3 +103,28 @@ The original code you pasted earlier (from Alibaba's Wan repo) corresponds to th
 - [ ] Verify image resolution handling in [`sampling.py:91`](./inference/sampling.py)
 - [ ] Verify latent unpacking logic in [`sampling.py:226`](./inference/sampling.py)
 - [ ] Add more sampling schedulers (beyond flow matching)
+
+
+---
+`WanVAE2.2` or `WanVAE38`
+The "38" suffix refers to the **Wan 2.2 VAE** variant, which is different from the original Wan VAE:
+
+| Feature | `WanVideoVAE` (original) | `WanVideoVAE38` (Wan 2.2) |
+|---------|--------------------------|---------------------------|
+| Latent dim (`z_dim`) | 16 | **48** |
+| Encoder dim | 96 | **160** |
+| Decoder dim | 96 | **256** |
+| Uses patchify | No | **Yes** (2x2) |
+| Upsampling factor | 8 | **16** |
+| Classes used | `VideoVAE_`, `Encoder3d`, `Decoder3d` | `VideoVAE38_`, `Encoder3d_38`, `Decoder3d_38` |
+
+The "38" naming likely comes from an internal Alibaba version number. The key architectural difference is that the **Wan 2.2 VAE** (the 38 version) has:
+- Higher latent dimensionality (48 vs 16 channels)
+- Uses 2x2 spatial patchification before encoding
+- Uses `Resample38` which is designed to match the original Wan 2.2 temporal handling
+
+You're using `WanVideoVAE38` which is correct for the **Wan 2.2 TI2V-5B** model you're working with.
+
+The original code you pasted earlier (from Alibaba's Wan repo) corresponds to the `Wan2_2_VAE` class which uses `WanVAE_` - this is **equivalent** to your `VideoVAE38_` in torchtitan. The naming is just different.
+
+---
