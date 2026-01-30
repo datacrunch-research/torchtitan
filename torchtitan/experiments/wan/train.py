@@ -194,7 +194,11 @@ class WanTrainer(Trainer):
             # Raw video frames: (B, T, H, W, C) with C=3 (RGB)
             if labels.shape[1] == 48:
                 # Pre-loaded latents: (B, C, T, H, W) - already downsampled
-                T_latent, H_latent, W_latent = labels.shape[2], labels.shape[3], labels.shape[4]
+                T_latent, H_latent, W_latent = (
+                    labels.shape[2],
+                    labels.shape[3],
+                    labels.shape[4],
+                )
             else:
                 # Raw video frames: (B, T, H, W, C)
                 # VAE downsampling: temporal (T-1)//4 + 1, spatial 16x (512->32)

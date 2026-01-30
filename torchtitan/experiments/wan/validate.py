@@ -238,7 +238,9 @@ class WanValidator(Validator):
             # validation_context() doesn't accept it as an argument. To enable CP, follow the
             # Flux pattern: use cp_shard() to shard tensors before validation_context() instead
             # of passing a context manager. See torchtitan/models/flux/train.py for reference.
-            optional_context_parallel_ctx = None  # noqa: F841 - kept for future CP implementation
+            optional_context_parallel_ctx = (
+                None  # noqa: F841 - kept for future CP implementation
+            )
             if parallel_dims.cp_enabled:
                 # Pack latents for context parallel
                 latents_p = pack_latents(noisy_latents)

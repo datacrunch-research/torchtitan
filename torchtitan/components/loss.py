@@ -36,7 +36,9 @@ def build_cross_entropy_loss(job_config: JobConfig, **kwargs):
     return loss_fn
 
 
-def mse_loss(pred: torch.Tensor, labels: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+def mse_loss(
+    pred: torch.Tensor, labels: torch.Tensor, reduction: str = "sum"
+) -> torch.Tensor:
     """Common MSE loss function for diffusion models training."""
     return torch.nn.functional.mse_loss(
         pred.float(), labels.float().detach(), reduction=reduction
