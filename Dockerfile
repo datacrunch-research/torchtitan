@@ -35,4 +35,6 @@ ENV TORCHELASTIC_ERROR_FILE=/tmp/torchelastic_error.json
 
 EXPOSE 29500
 
-CMD ["/bin/bash"]
+# Default entrypoint runs training script
+# Works for both single-node (docker run) and multi-node (Kubernetes)
+ENTRYPOINT ["/workspace/torchtitan/train_fp8.sh"]
