@@ -1,6 +1,6 @@
 [job]
-dump_folder = "./outputs"
-description = "Wan video model with 1x-wmds dataset"
+dump_folder = "./outputs/wan2.2-5B_bs128_fp8_compile"
+description = "Wan 2.2-5B trained with 1x-wmds dataset"
 custom_config_module = "torchtitan.experiments.wan.job_config"
 
 [profiling]
@@ -20,30 +20,34 @@ enable_wandb = true
 [model]
 name = "wan"
 flavor = "wan-video"
+converters = ["quantize.linear.float8"]
 
 [optimizer]
 name = "AdamW"
-lr = 1e-6
+lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
 warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
+
 [training]
-local_batch_size = 16
+loss_reduction = "mean"
+local_batch_size = 128
 max_norm = 1.0  # grad norm clipping
 steps = 10_000
 dataset = "1xwm"
 dataset_path = "./dataset/world_model_raw_data/train_v2.0_raw"
-downsampled = 1  # Downsampling factor: 1, 2, or 4
+downsampled = 4  # Downsampling factor: 1, 2, or 4
 clip_length = 77  # Number of frames per clip
-window_size = 1  # Window size for sampling clips
+window_size = 4  # Window size for sampling clips
 robot_temporal_mode = "downsample"  # How to handle robot state temporal alignment
 num_workers = 8  # Number of worker processes for data loading (0 = main process only)
 persistent_workers = true  # Keep workers alive across epochs (requires num_workers > 0)
 pin_memory = true  # Pin memory for faster GPU transfer (recommended when using GPU)
 prefetch_factor = 1  # Number of batches each worker prefetches ahead (default: 2, higher = more memory)
+dtype = "bfloat16"
 
 [encoder]
 t5_encoder = "google/umt5-xxl"
@@ -62,6 +66,10 @@ enable = true  # Enable torch.compile for VAE and model
 components = ["model"] # ["vae", "model"]  # Compile both VAE and diffusion model
 backend = "inductor"
 
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
+
 [checkpoint]
 enable = true
 folder = "checkpoint"
@@ -76,7 +84,7 @@ dataset = "1xwm"  # Can use same dataset for validation
 dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"  # Validation dataset path
 local_batch_size = 16
 steps = 8    # Recommended value with the current settings and world_size=8
-freq = 10
+freq = 100
 enable_classifier_free_guidance = false
 classifier_free_guidance_scale = 1.0
 denoising_steps = 50

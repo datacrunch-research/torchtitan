@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+from datetime import datetime
 from typing import Generator, Optional
 
 import torch
@@ -106,6 +107,16 @@ class WanValidator(Validator):
         self.t5_encoder = t5_encoder
         self.precomputed_t5_embedding = precomputed_t5_embedding
 
+        # Create timestamped video output directory (created once per training run)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._video_output_dir = os.path.join(
+            self.job_config.job.dump_folder,
+            self.job_config.validation.save_img_folder,
+            timestamp,
+        )
+        os.makedirs(self._video_output_dir, exist_ok=True)
+        logger.info(f"Validation videos will be saved to: {self._video_output_dir}")
+
         # Overfit mode: use same batch as training for validation
         self._overfit_batch: tuple[dict[str, Tensor], Tensor] | None = None
         self._overfit_mode = getattr(
@@ -135,7 +146,7 @@ class WanValidator(Validator):
         This generates videos using the diffusion model and computes PSNR
         against ground truth to measure model performance.
         """
-
+        logger.info("Validator: starting validation step")
         # Set model to eval mode
         # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
@@ -205,7 +216,6 @@ class WanValidator(Validator):
             )
             t5_encodings = processed_input["t5_encodings"]
             latents = processed_input["latents"]  # Ground truth latents
-            logger.info(f"{latents.shape}")
 
             bsz = latents.shape[0]
 
@@ -301,13 +311,9 @@ class WanValidator(Validator):
                 )
 
                 # Save video periodically
-                output_dir = os.path.join(
-                    self.job_config.job.dump_folder,
-                    self.job_config.validation.save_img_folder,
-                )
                 save_video(
                     name=f"video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
-                    output_dir=output_dir,
+                    output_dir=self._video_output_dir,
                     video=generated_video,
                     add_sampling_metadata=True,
                 )
@@ -324,7 +330,7 @@ class WanValidator(Validator):
                 # Save ground truth/target video for comparison
                 save_video(
                     name=f"target_video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
-                    output_dir=output_dir,
+                    output_dir=self._video_output_dir,
                     video=gt_video,
                     add_sampling_metadata=False,
                 )
@@ -379,13 +385,9 @@ class WanValidator(Validator):
                 )
 
                 # Save generated video
-                output_dir = os.path.join(
-                    self.job_config.job.dump_folder,
-                    self.job_config.validation.save_img_folder,
-                )
                 save_video(
                     name=f"video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
-                    output_dir=output_dir,
+                    output_dir=self._video_output_dir,
                     video=generated_video,
                     add_sampling_metadata=True,
                 )
@@ -402,7 +404,7 @@ class WanValidator(Validator):
                 # Save decoded ground truth video for comparison
                 save_video(
                     name=f"target_video_rank{str(torch.distributed.get_rank())}_step{step}.mp4",
-                    output_dir=output_dir,
+                    output_dir=self._video_output_dir,
                     video=gt_video,
                     add_sampling_metadata=False,
                 )
@@ -527,7 +529,6 @@ if __name__ == "__main__":
         python -m torchtitan.experiments.wan.validate
     """
     import random
-    from datetime import datetime
 
     # from icecream import ic
     from PIL import Image

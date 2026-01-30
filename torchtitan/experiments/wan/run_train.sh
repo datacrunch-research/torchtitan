@@ -18,9 +18,11 @@ export PYTORCH_ALLOC_CONF="expandable_segments:True"
 export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-"INFO"}
 export PYTHONUNBUFFERED=1
 
+LOG_DIR=${LOG_DIR:-"./logs/$(date +%Y%m%d_%H%M%S)"}
+
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
---log-dir ./logs \
+--log-dir "${LOG_DIR}" \
 -m torchtitan.experiments.wan.train \
 --job.config_file ${CONFIG_FILE} "$@"
 # --job.custom_config_module ${CONFIG_FILE} "$@"

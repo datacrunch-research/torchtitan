@@ -61,7 +61,7 @@ prefetch_factor = 1
 dtype = "bfloat16"
 # PRE-ENCODED LATENTS CONFIG
 latents_path = "./dataset/world_model_raw_data/train_v2.0_latents"
-overfit_single_sample = true
+overfit_single_sample = false
 
 [encoder]
 t5_encoder = "google/umt5-xxl"
@@ -96,7 +96,7 @@ async_mode = "async"
 enable = true
 dataset = "1xwm"
 dataset_path = "./dataset/world_model_raw_data/val_v2.0_raw"
-local_batch_size = 1
+local_batch_size = 16
 steps = 1
 freq = 100
 enable_classifier_free_guidance = false

@@ -32,7 +32,7 @@ torchrun --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --lo
  --job.config_file=./torchtitan/experiments/wan/train_configs/wan_1xwm_latents.toml
 ```
 
---- 
+---
 ## Comprehensive TODO List for `add_validation` Branch
 
 1. Select dataset -> In our case this is the 1x World Model dataset (+ other NVIDIA stuff)
