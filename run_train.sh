@@ -30,6 +30,7 @@ export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
 TRAIN_FILE=${TRAIN_FILE:-"torchtitan.train"}
 COMM_MODE=${COMM_MODE:-""}
+LOG_DIR=${LOG_DIR:-"./outputs/logs"}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
@@ -43,5 +44,6 @@ else
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
     torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
+    --log-dir ${LOG_DIR} \
     -m ${TRAIN_FILE} --job.config_file ${CONFIG_FILE} "$@"
 fi

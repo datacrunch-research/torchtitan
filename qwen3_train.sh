@@ -3,10 +3,14 @@
 export NUM_NODES=1
 export MASTER_ADDR=localhost
 
-# export TORCH_FR_DUMP_TEMP_FILE="/tmp/trace_qwen3_"
-# export TORCH_NCCL_DUMP_ON_TIMEOUT=1
-# export TORCH_FR_BUFFER_SIZE=2000
-export TORCH_NCCL_DEBUG_INFO_PIPE_FILE=/tmp/nccl_trace_pipe
+# NCCL debug logging - real-time output to file
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_FILE=/home/riccardo/torchtitan/logs/nccl_debug_%h_%p.log
+
+# Flight recorder - dumps on timeout/error
+export TORCH_NCCL_DEBUG_INFO_TEMP_FILE=/home/riccardo/torchtitan/logs/nccl_trace_
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 
 torchrun \
   --nnodes $NUM_NODES \
