@@ -16,7 +16,7 @@ RUN pip3 install --force-reinstall --pre torch torchvision --index-url https://d
 
 # Install Python dependencies from requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install  -e .
+RUN pip3 install .
 
 # Download HF assets (tokenizer)                                                                                                     
 RUN --mount=type=secret,id=hf_token \
