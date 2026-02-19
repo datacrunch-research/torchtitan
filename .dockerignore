@@ -60,3 +60,6 @@ tb_logs/
 
 # Weights & Biases
 wandb/
+
+Dockerfile_70B
+Dockerfiles

@@ -11,12 +11,12 @@ export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${PET_MASTER_ADDR:-localhost}
 export MASTER_PORT=${PET_MASTER_PORT:-29500}
 
-# NCCL profiler settings
-export NCCL_PROFILER_PLUGIN=/workspace/nccl/ext-profiler/inspector/libnccl-profiler-inspector.so
-export NCCL_INSPECTOR_ENABLE=1
-export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
-export NCCL_INSPECTOR_PROM_DUMP=1
-export NCCL_INSPECTOR_DUMP_DIR=/workspace/prom_dump/
+# NCCL profiler disabled — plugin may not support reduce_scatter_tensor_coalesced
+# export NCCL_PROFILER_PLUGIN=/workspace/nccl/ext-profiler/inspector/libnccl-profiler-inspector.so
+# export NCCL_INSPECTOR_ENABLE=1
+# export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
+# export NCCL_INSPECTOR_PROM_DUMP=1
+# export NCCL_INSPECTOR_DUMP_DIR=/workspace/prom_dump/
 
 torchrun \
   --nnodes=$NUM_NODES \

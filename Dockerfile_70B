@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:25.12-py3
+FROM nvcr.io/nvidia/pytorch:26.01-py3
 
 WORKDIR /workspace/torchtitan
 
@@ -11,26 +11,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY . .
 
-# Install nightly PyTorch
-RUN pip3 install --force-reinstall --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
-
 # Install Python dependencies from requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Install pinned nightly PyTorch (known working version)
+# NGC 26.01 base PyTorch lacks reduce_scatter_tensor_coalesced support needed by TP
+RUN pip3 install --force-reinstall torch torchvision torchao --index-url https://download.pytorch.org/whl/nightly/cu130
+
 RUN pip3 install .
 
-# Download HF assets (tokenizer)                                                                                                     
+# Download HF assets (tokenizer)
 RUN --mount=type=secret,id=hf_token \
 	HF_TOKEN=$(cat /run/secrets/hf_token) \
-	python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-70B --assets tokenizer 
+    python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-70B --assets tokenizer 
 
-RUN cd .. && git clone https://github.com/NVIDIA/nccl.git &&  cd nccl/ext-profiler/inspector && make
-ENV NCCL_PROFILER_PLUGIN=/workspace/nccl/ext-profiler/inspector/libnccl-profiler-inspector.so
-ENV NCCL_INSPECTOR_ENABLE=1
-ENV NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500  
+
+# NCCL profiler disabled — plugin may not support reduce_scatter_tensor_coalesced
+# RUN cd .. && git clone https://github.com/NVIDIA/nccl.git &&  cd nccl/ext-profiler/inspector && make
+# ENV NCCL_PROFILER_PLUGIN=/workspace/nccl/ext-profiler/inspector/libnccl-profiler-inspector.so
+# ENV NCCL_INSPECTOR_ENABLE=1
+# ENV NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
 
 # Use source code (not package) to ensure compatibility with nightly PyTorch
-ENV NCCL_DEBUG=INFO
-ENV TORCH_DISTRIBUTED_DEBUG=DETAIL
+ENV NCCL_DEBUG=WARN
+# ENV TORCH_DISTRIBUTED_DEBUG=OFF
 ENV TORCHELASTIC_ERROR_FILE=/tmp/torchelastic_error.json
 
 EXPOSE 29500

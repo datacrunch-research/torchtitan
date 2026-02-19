@@ -33,3 +33,10 @@ export NCCL_DEBUG=WARN
 export TORCH_DISTRIBUTED_DEBUG=OFF
 ./train_fp8.sh
 ```
+
+
+```bash
+docker build -t torchtitan:llama3-70b -f Dockerfile_70B --secret id=hf_token,src=$HOME/.cache/huggingface/token .
+docker tag torchtitan:llama3-70b registry.datacrunch.io/verda-aa/torchtitan:llama3-70b-v1
+docker push registry.datacrunch.io/verda-aa/torchtitan:llama3-70b
+```
