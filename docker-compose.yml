@@ -1,0 +1,28 @@
+services:
+  torchtitan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - hf_token
+    image: torchtitan:llama3-70b
+    container_name: torchtitan
+    runtime: nvidia
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NCCL_DEBUG=WARN
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
+    volumes:
+      - ./outputs:/workspace/torchtitan/outputs
+    working_dir: /workspace/torchtitan
+    stdin_open: true
+    tty: true
+
+secrets:
+  hf_token:
+    file: ${HOME}/.cache/huggingface/token

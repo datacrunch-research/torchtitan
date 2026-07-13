@@ -1,0 +1,63 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite
+
+# Test outputs
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CI/CD (but keep requirements files: requirements.txt is a symlink into .ci/docker/)
+.github/
+.ci/*
+!.ci/docker/
+!.ci/docker/*.txt
+
+# Documentation builds
+docs/_build/
+
+# Checkpoints and model outputs (if any in repo)
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Tensorboard logs
+runs/
+tb_logs/
+
+# Weights & Biases
+wandb/
