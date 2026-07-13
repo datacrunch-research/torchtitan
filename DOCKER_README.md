@@ -15,11 +15,15 @@ docker build -t torchtitan:llama3-70b \
   --secret id=hf_token,src=$HOME/.cache/huggingface/token .
 ```
 
-Tag and push to the registry:
+Tag and push to your registry. Fill in `<REGISTRY>/<NAMESPACE>` and choose a
+**fresh, unique tag** so you do not overwrite an image other jobs may depend on
+(e.g. include a date or version):
 
 ```bash
-docker tag torchtitan:llama3-70b registry.datacrunch.io/verda-aa/torchtitan:llama3-70b
-docker push registry.datacrunch.io/verda-aa/torchtitan:llama3-70b
+# Example - replace <REGISTRY>/<NAMESPACE> and the tag with your own.
+docker login <REGISTRY>
+docker tag torchtitan:llama3-70b <REGISTRY>/<NAMESPACE>/torchtitan:llama3-70b-$(date +%Y%m%d)
+docker push <REGISTRY>/<NAMESPACE>/torchtitan:llama3-70b-$(date +%Y%m%d)
 ```
 
 ## Running
