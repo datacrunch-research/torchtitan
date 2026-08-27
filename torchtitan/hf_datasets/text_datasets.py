@@ -232,6 +232,66 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         return _state_dict
 
 
+class CachedBatchDataset(IterableDataset, Stateful):
+    """Repeat a fixed prefix of another dataset forever.
+
+    Materializes the first ``num_samples`` samples of ``dataset`` in memory and
+    then cycles over them, so the underlying source is read exactly once. This
+    is meant for performance benchmarking: it keeps step time free of data
+    loading noise and avoids continuously streaming from HuggingFace.
+
+    Only the read position is checkpointed. The cached samples are always
+    re-read from the head of the source, which is deterministic, so a resumed
+    run sees the same samples as the original one.
+    """
+
+    def __init__(self, dataset: IterableDataset, num_samples: int) -> None:
+        if num_samples <= 0:
+            raise ValueError(f"num_samples must be positive, got {num_samples}")
+
+        self._dataset = dataset
+        self._num_samples = num_samples
+        self._samples: list[tuple[dict[str, torch.Tensor], torch.Tensor]] = []
+
+        # Variables for checkpointing
+        self._sample_idx = 0
+
+    def _materialize(self) -> None:
+        if self._samples:
+            return
+
+        data_iter = iter(self._dataset)
+        for _ in range(self._num_samples):
+            try:
+                self._samples.append(next(data_iter))
+            except StopIteration:
+                raise ValueError(
+                    f"The dataset ran out after {len(self._samples)} samples, but "
+                    f"{self._num_samples} are needed to fill the cached batches. "
+                    "Use a larger dataset or fewer cached batches."
+                ) from None
+        logger.info(
+            f"Cached {self._num_samples} samples in memory; "
+            "they will be repeated for the rest of the run"
+        )
+
+    def __iter__(self):
+        self._materialize()
+        while True:
+            sample = self._samples[self._sample_idx]
+            # Advance before yielding so the checkpointed index always points at
+            # the next sample to read: a generator suspends at the yield, so an
+            # update placed after it would not run before state_dict() is called.
+            self._sample_idx = (self._sample_idx + 1) % self._num_samples
+            yield sample
+
+    def load_state_dict(self, state_dict):
+        self._sample_idx = state_dict["sample_idx"]
+
+    def state_dict(self):
+        return {"sample_idx": self._sample_idx}
+
+
 class HuggingFaceTextDataLoader(ParallelAwareDataloader):
     """Configurable text dataloader that wraps HuggingFaceTextDataset.
 
@@ -247,6 +307,16 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
+        num_cached_batches: int = 0
+        """
+        If positive, read this many batches from the head of the dataset once, keep
+        them in memory, and repeat them for the rest of the run. The dataset is then
+        never read again, which removes data loading (e.g. HuggingFace streaming)
+        from the training loop. Intended for performance benchmarking: the model
+        overfits the repeated batches, so the loss curve says nothing about
+        convergence on the real data distribution.
+        """
+
     def __init__(
         self,
         config: Config,
@@ -259,7 +329,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
-        hf_ds = HuggingFaceTextDataset(
+        ds: IterableDataset = HuggingFaceTextDataset(
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,
             tokenizer=tokenizer,
@@ -268,6 +338,8 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
             dp_world_size=dp_world_size,
             infinite=config.infinite,
         )
+        if config.num_cached_batches > 0:
+            ds = CachedBatchDataset(ds, config.num_cached_batches * local_batch_size)
 
         dataloader_kwargs = {
             "num_workers": config.num_workers,
@@ -279,7 +351,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         }
 
         super().__init__(
-            hf_ds,
+            ds,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             **dataloader_kwargs,
@@ -318,6 +390,11 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
                 raise ValueError(
                     f"All data sources must have the same 'infinite' setting, "
                     f"got: {[(s.dataset, s.infinite) for s in self.sources]}"
+                )
+            if any(source.num_cached_batches > 0 for source in self.sources):
+                raise ValueError(
+                    "'num_cached_batches' is not supported for interleaved sources; "
+                    "a cached batch has no well-defined source mixture."
                 )
 
     def __init__(

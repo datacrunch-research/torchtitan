@@ -6,11 +6,13 @@
 
 import unittest
 
+import torch
 from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets.text_datasets import (
+    CachedBatchDataset,
     HFDataSource,
     HuggingFaceTextDataLoader,
     InterleavedHuggingFaceTextDataLoader,
@@ -302,6 +304,90 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             single_batch_input["positions"].shape,
             interleaved_batch_input["positions"].shape,
         )
+
+
+class TestCachedBatchDataset(unittest.TestCase):
+    """Cover repeating a fixed prefix of the dataset (config.num_cached_batches)."""
+
+    def _make_dataloader(self, num_cached_batches: int, local_batch_size: int = 2):
+        return HuggingFaceTextDataLoader(
+            HuggingFaceTextDataLoader.Config(
+                dataset="c4_test",
+                num_workers=0,
+                infinite=False,
+                num_cached_batches=num_cached_batches,
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=DummyTokenizer(),
+            seq_len=128,
+            local_batch_size=local_batch_size,
+        )
+
+    def test_batches_repeat_with_period_num_cached_batches(self):
+        num_cached_batches = 2
+        dataloader = self._make_dataloader(num_cached_batches)
+
+        batches = []
+        for i, batch in enumerate(dataloader):
+            batches.append(batch)
+            if len(batches) == 3 * num_cached_batches:
+                break
+
+        for i in range(num_cached_batches, len(batches)):
+            inputs, labels = batches[i]
+            ref_inputs, ref_labels = batches[i - num_cached_batches]
+            self.assertTrue(torch.equal(inputs["input"], ref_inputs["input"]))
+            self.assertTrue(torch.equal(inputs["positions"], ref_inputs["positions"]))
+            self.assertTrue(torch.equal(labels, ref_labels))
+
+        # The cached batches themselves must still be distinct data.
+        self.assertFalse(torch.equal(batches[0][1], batches[1][1]))
+
+    def test_source_is_read_only_once(self):
+        num_samples = 4
+        source = DummyDataset()
+        dataset = CachedBatchDataset(source, num_samples)
+
+        data_iter = iter(dataset)
+        samples = [next(data_iter) for _ in range(3 * num_samples)]
+
+        # DummyDataset yields strictly increasing values, so a second read of the
+        # source would show values beyond the cached prefix.
+        for i, (sample, label) in enumerate(samples):
+            self.assertEqual(sample["input"], i % num_samples)
+            self.assertEqual(label, i % num_samples)
+
+    def test_raises_when_source_is_too_short(self):
+        dataset = CachedBatchDataset(DummyDataset(), num_samples=101)
+        with self.assertRaisesRegex(ValueError, "ran out after 100 samples"):
+            next(iter(dataset))
+
+    def test_rejects_non_positive_num_samples(self):
+        with self.assertRaises(ValueError):
+            CachedBatchDataset(DummyDataset(), num_samples=0)
+
+    def test_state_dict_resumes_the_cycle(self):
+        num_samples = 4
+        dataset = CachedBatchDataset(DummyDataset(), num_samples)
+
+        data_iter = iter(dataset)
+        for _ in range(num_samples + 1):
+            next(data_iter)
+        state_dict = dataset.state_dict()
+
+        resumed = CachedBatchDataset(DummyDataset(), num_samples)
+        resumed.load_state_dict(state_dict)
+        sample, label = next(iter(resumed))
+
+        self.assertEqual(sample["input"], 1)
+        self.assertEqual(label, 1)
+
+    def test_interleaved_rejects_num_cached_batches(self):
+        with self.assertRaisesRegex(ValueError, "num_cached_batches"):
+            InterleavedHuggingFaceTextDataLoader.Config(
+                sources=[HFDataSource(dataset="c4_test", num_cached_batches=1)]
+            )
 
 
 if __name__ == "__main__":

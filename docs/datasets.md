@@ -61,6 +61,31 @@ dataloader=HuggingFaceTextDataLoader.Config(
 ),
 ```
 
+### Repeating a fixed set of batches (benchmarking)
+
+Set `num_cached_batches` to read that many batches from the head of the dataset
+once, keep them in memory, and repeat them for the rest of the run. The dataset
+is never read again, so the training loop does no data loading at all -- useful
+when streaming from HuggingFace at scale would otherwise add noise (or network
+traffic) to a performance measurement.
+
+```python
+dataloader=HuggingFaceTextDataLoader.Config(
+    dataset="c4",
+    num_cached_batches=1,
+),
+```
+
+or on the command line:
+
+```bash
+--dataloader.dataset c4 --dataloader.num_cached_batches 1
+```
+
+The model overfits the repeated batches, so the loss curve says nothing about
+convergence on the real data distribution -- use this for step-time measurements
+only. `num_cached_batches` is not supported for interleaved sources.
+
 ---
 
 ## Instruction-tuning / SFT datasets (chat)
